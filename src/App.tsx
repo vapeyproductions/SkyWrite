@@ -109,18 +109,18 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
       screenStrokes.slice(0,strokeIndex+1).forEach(points=>{shadeContext.beginPath();points.forEach((p,i)=>i?shadeContext.lineTo(p[0],p[1]):shadeContext.moveTo(p[0],p[1]));shadeContext.stroke()})
       shadeContext.globalCompositeOperation='source-over';ctx.drawImage(shade,0,0,w,h)
     }
-    const showPath=level===1 || (level===3 && hintAge>=15)
+    const showPath=level<=2 || (level===3 && hintAge>=15)
     if (showPath&&level!==1) { data.strokes.forEach((s,i)=>{path(s.points);ctx.strokeStyle=i<strokeIndex?'#56baa7':i===strokeIndex?'rgba(108,86,223,.55)':'rgba(108,86,223,.18)';ctx.lineWidth=10;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([]) }
     completedTraces.current.forEach(points=>{if(points.length>1){path(points,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()}})
     if (trace.current.length>1) { path(trace.current,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash([]);ctx.stroke() }
     if (!complete&&stroke) { const start=point(stroke.points[0]), end=point(stroke.points.at(-1)!)
-      if ((level===1&&traceState.current==='WAITING') || (level===3&&hintAge>=5)) { ctx.fillStyle='#6c56df';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4) }
-      if ((level===1&&traceState.current==='TRACING') || (level===3&&hintAge>=15)) { ctx.fillStyle='#30a992';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(end[0],end[1],21,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 9px sans-serif';ctx.textAlign='center';ctx.fillText('END',end[0],end[1]+3) }
-      if(level===1&&traceState.current==='TRACING'){
+      if ((level<=2&&traceState.current==='WAITING') || (level===3&&hintAge>=5)) { ctx.fillStyle='#6c56df';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4) }
+      if ((level<=2&&traceState.current==='TRACING') || (level===3&&hintAge>=15)) { ctx.fillStyle='#30a992';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(end[0],end[1],21,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 9px sans-serif';ctx.textAlign='center';ctx.fillText('END',end[0],end[1]+3) }
+      if(level<=2&&traceState.current==='TRACING'){
         const activePoints=screenStrokes[strokeIndex],metrics=polylineMetrics(activePoints),now=performance.now(),delta=Math.min((now-lastDrawTime.current)/1000,.1),scale=Math.max(.72,size/720),first=activePoints[0],last=activePoints.at(-1)!,mostlyVertical=Math.abs(last[1]-first[1])>Math.abs(last[0]-first[0]),movingUp=mostlyVertical&&last[1]<first[1],movingDown=mostlyVertical&&last[1]>first[1],lead=(movingUp?44:movingDown?36:46)*scale,speed=(movingUp?46:movingDown?34:42)*scale
         guideProgress.current=Math.min(metrics.total,userProgress.current+lead,guideProgress.current+speed*delta)
         const guide=pointAtDistance(screenStrokes[strokeIndex],metrics.lengths,metrics.cumulative,guideProgress.current);ctx.shadowColor='#79e7ba';ctx.shadowBlur=18;ctx.fillStyle='#4ed3a0';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(guide[0],guide[1],13,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0
-      } else if (level===2 || (level===3&&hintAge>=15)) { const guide=point(stroke.points[Math.floor((Date.now()/520)%stroke.points.length)]);ctx.shadowColor='#ffcf55';ctx.shadowBlur=16;ctx.fillStyle='#ffcf55';ctx.beginPath();ctx.arc(guide[0],guide[1],10,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0 }
+      } else if (level===3&&hintAge>=15) { const guide=point(stroke.points[Math.floor((Date.now()/520)%stroke.points.length)]);ctx.shadowColor='#ffcf55';ctx.shadowBlur=16;ctx.fillStyle='#ffcf55';ctx.beginPath();ctx.arc(guide[0],guide[1],10,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0 }
     }
     if (finger) { ctx.fillStyle='#ffe05b';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(finger[0],finger[1],11,0,Math.PI*2);ctx.fill();ctx.stroke() }
     lastDrawTime.current=performance.now()
@@ -129,7 +129,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
   const addPoint = useCallback((p: Point, pointing=true) => {
     if (!data || complete) return
     const box=canvasRef.current!.getBoundingClientRect(), size=Math.min(box.width,box.height)*.86, ox=(box.width-size)/2, oy=(box.height-size)/2
-    if(level===1){
+    if(level<=2){
       if(!pointing){previousPoint.current=null;return}
       if(traceState.current==='TRANSITION') return
       const scale=Math.max(.72,size/720), activeIndex=strokeIndexRef.current, points=data.strokes[activeIndex].points.map(([x,y])=>[ox+x*size,oy+y*size] as Point)
@@ -199,7 +199,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
             const b=canvasRef.current.getBoundingClientRect(),raw:Point=[(1-tip.x)*b.width,tip.y*b.height],previous=smoothedPoint.current
             if(previous){const distance=Math.hypot(raw[0]-previous[0],raw[1]-previous[1]),alpha=distance>30?.46:distance>10?.27:.13;smoothedPoint.current=distance<3?previous:[previous[0]+alpha*(raw[0]-previous[0]),previous[1]+alpha*(raw[1]-previous[1])]}
             else smoothedPoint.current=raw
-            finger=smoothedPoint.current;addPoint(finger,level===1?isPointingHand(hand):true)
+            finger=smoothedPoint.current;addPoint(finger,level<=2?isPointingHand(hand):true)
           }
           else {smoothedPoint.current=null;previousPoint.current=null}
         } catch (error) { console.error('SkyWrite hand tracking frame failed.',error) }

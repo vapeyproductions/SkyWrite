@@ -117,7 +117,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
       if ((level===1&&traceState.current==='WAITING') || (level===3&&hintAge>=5)) { ctx.fillStyle='#6c56df';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4) }
       if ((level===1&&traceState.current==='TRACING') || (level===3&&hintAge>=15)) { ctx.fillStyle='#30a992';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(end[0],end[1],21,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 9px sans-serif';ctx.textAlign='center';ctx.fillText('END',end[0],end[1]+3) }
       if(level===1&&traceState.current==='TRACING'){
-        const activePoints=screenStrokes[strokeIndex],metrics=polylineMetrics(activePoints),now=performance.now(),delta=Math.min((now-lastDrawTime.current)/1000,.1),scale=Math.max(.72,size/720),first=activePoints[0],last=activePoints.at(-1)!,mostlyVertical=Math.abs(last[1]-first[1])>Math.abs(last[0]-first[0]),lead=(mostlyVertical?36:46)*scale,speed=(mostlyVertical?27:36)*scale
+        const activePoints=screenStrokes[strokeIndex],metrics=polylineMetrics(activePoints),now=performance.now(),delta=Math.min((now-lastDrawTime.current)/1000,.1),scale=Math.max(.72,size/720),first=activePoints[0],last=activePoints.at(-1)!,mostlyVertical=Math.abs(last[1]-first[1])>Math.abs(last[0]-first[0]),movingUp=mostlyVertical&&last[1]<first[1],movingDown=mostlyVertical&&last[1]>first[1],lead=(movingUp?44:movingDown?36:46)*scale,speed=(movingUp?46:movingDown?34:42)*scale
         guideProgress.current=Math.min(metrics.total,userProgress.current+lead,guideProgress.current+speed*delta)
         const guide=pointAtDistance(screenStrokes[strokeIndex],metrics.lengths,metrics.cumulative,guideProgress.current);ctx.shadowColor='#79e7ba';ctx.shadowBlur=18;ctx.fillStyle='#4ed3a0';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(guide[0],guide[1],13,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0
       } else if (level===2 || (level===3&&hintAge>=15)) { const guide=point(stroke.points[Math.floor((Date.now()/520)%stroke.points.length)]);ctx.shadowColor='#ffcf55';ctx.shadowBlur=16;ctx.fillStyle='#ffcf55';ctx.beginPath();ctx.arc(guide[0],guide[1],10,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0 }
@@ -143,10 +143,10 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
         userProgress.current=Math.max(userProgress.current,nearest.progress)
         if(previousPoint.current) trace.current.push(p)
         previousPoint.current=p
-        if(userProgress.current>=metrics.total-42*scale&&Math.hypot(p[0]-end[0],p[1]-end[1])<=42*scale){
-          completedTraces.current.push([...trace.current]);trace.current=[];previousPoint.current=null;userProgress.current=0;guideProgress.current=0
+        if(userProgress.current>=metrics.total-12*scale&&Math.hypot(p[0]-end[0],p[1]-end[1])<=16*scale){
+          trace.current.push(end);completedTraces.current.push([...trace.current]);trace.current=[];previousPoint.current=null;userProgress.current=0;guideProgress.current=0
           const next=activeIndex+1
-          if(next===data.strokes.length){strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';setComplete(true);setMessage(`Amazing! Look at the ${symbol} you created!`);onComplete()} else {traceState.current='TRANSITION';setTransitioning(true);setMessage(`Wonderful stroke ${next}! Pause and look at what you made…`);transitionTimer.current=window.setTimeout(()=>{strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';setTransitioning(false);setMessage(`Ready? Find Go for stroke ${next+1}`);startedAt.current=performance.now();transitionTimer.current=null},1800)}
+          if(next===data.strokes.length){strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';setComplete(true);setMessage(`Amazing! Look at the ${symbol} you created!`);onComplete()} else {traceState.current='TRANSITION';setTransitioning(true);setMessage(`Wonderful stroke ${next}! Pause and look at what you made…`);transitionTimer.current=window.setTimeout(()=>{strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';setTransitioning(false);setMessage(`Ready? Find Go for stroke ${next+1}`);startedAt.current=performance.now();transitionTimer.current=null},1000)}
         }
       } else { previousPoint.current=null }
       return

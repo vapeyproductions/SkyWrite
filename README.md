@@ -9,7 +9,8 @@ Browser-based learning dashboard and air-writing practice app, adapted from the 
 - Level 1 requires three consecutive completions under 30 seconds with at least 80% of tracked movement inside the tracing corridor.
 - Level 2 requires three consecutive completions under 30 seconds with at least 80% dotted-path coverage.
 - Level 3 requires five consecutive completions under 30 seconds without revealing either hint.
-- The three practice cards run an endless random-character session at the chosen level and never change mastery progress.
+- The first three practice cards run an endless random-character session at the chosen level and never change mastery progress.
+- **Level 4: Free Write** is a separate model-testing mode. It shows only the target character, with no trace, path, or hints. Its camera points pass through the delayed DRAW/MOVE intent model and stroke smoother, then a symbol model checks the cleaned result against the hidden manuscript stroke order. Short off-template startup marks are discarded, a confident whole-character match advances automatically, and 15 seconds without intentional drawing clears the attempt. These models are not loaded or used by Levels 1–3.
 
 Learner progress is saved in the current browser after every completed learning-path character. No email, password, camera frame, or hand-tracking data is stored. Cross-device accounts require a future hosted authentication and database provider.
 

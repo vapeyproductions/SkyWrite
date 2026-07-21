@@ -50,8 +50,8 @@ function isPointingHand(hand: Array<{x:number;y:number}>) {
 
 function StrokePreview({ points }: { points: Point[] }) {
   const xs=points.map(point=>point[0]),ys=points.map(point=>point[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys)
-  const width=Math.max(maxX-minX,.001),height=Math.max(maxY-minY,.001),scale=Math.min(88/width,42/height)
-  const offsetX=12+(88-width*scale)/2-minX*scale,offsetY=11+(42-height*scale)/2-minY*scale
+  const width=Math.max(maxX-minX,.001),height=Math.max(maxY-minY,.001),scale=Math.min(82/width,34/height)
+  const offsetX=15+(82-width*scale)/2-minX*scale,offsetY=15+(34-height*scale)/2-minY*scale
   const preview=points.map(([x,y])=>[x*scale+offsetX,y*scale+offsetY] as Point)
   const path=preview.map(([x,y],index)=>`${index?'L':'M'} ${x.toFixed(2)} ${y.toFixed(2)}`).join(' ')
   const metrics=polylineMetrics(preview)
@@ -61,7 +61,7 @@ function StrokePreview({ points }: { points: Point[] }) {
     const before=pointAtDistance(preview,metrics.lengths,metrics.cumulative,Math.max(0,distance-7))
     const after=pointAtDistance(preview,metrics.lengths,metrics.cumulative,Math.min(metrics.total,distance+7))
     const angle=Math.atan2(after[1]-before[1],after[0]-before[0])*180/Math.PI
-    return <path className="stroke-preview-arrow" d="M 0 0 L -7 -3.6 L -5.6 0 L -7 3.6 Z" transform={`translate(${position[0].toFixed(2)} ${position[1].toFixed(2)}) rotate(${angle.toFixed(2)})`} key={`${fraction}-${index}`}/>
+    return <path className="stroke-preview-arrow" d="M 4 0 L -12 -7.5 L -8.5 0 L -12 7.5 Z" transform={`translate(${position[0].toFixed(2)} ${position[1].toFixed(2)}) rotate(${angle.toFixed(2)})`} key={`${fraction}-${index}`}/>
   })
   return <svg className="stroke-preview" viewBox="0 0 112 64" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
     <path className="stroke-preview-path" d={path}/>
@@ -104,6 +104,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
   const userProgress = useRef(0), guideProgress = useRef(0), previousPoint = useRef<Point|null>(null)
   const smoothedPoint = useRef<Point|null>(null), strokeIndexRef = useRef(0)
   const shadeCanvas = useRef<HTMLCanvasElement|null>(null), transitionTimer = useRef<number|null>(null)
+  const transitionStartedAt = useRef(performance.now())
   const lastProgressAt = useRef(performance.now()), lastMeaningfulProgress = useRef(0)
   const goHintShown = useRef(false), advancedHintShown = useRef(false)
   const [data, setData] = useState<StrokeData | null>(null), [cameraOn, setCameraOn] = useState(false)
@@ -125,19 +126,23 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
     const size=Math.min(w,h)*.86, ox=(w-size)/2, oy=(h-size)/2, point=(p:Point):Point=>[ox+p[0]*size,oy+p[1]*size]
     const stroke=data.strokes[Math.min(strokeIndex,data.strokes.length-1)]
     const screenStrokes=data.strokes.map(item=>item.points.map(point))
+    const transitionNextIndex=level<=2&&traceState.current==='TRANSITION'&&strokeIndex+1<data.strokes.length?strokeIndex+1:null
+    const transitionReveal=transitionNextIndex===null?1:Math.min(1,(performance.now()-transitionStartedAt.current)/500)
     const path=(pts:Point[],screen=false)=>{ctx.beginPath();pts.forEach((p,i)=>{const [x,y]=screen?p:point(p);i?ctx.lineTo(x,y):ctx.moveTo(x,y)})}
     if(level===1){
-      data.strokes.forEach((item,index)=>{path(item.points);ctx.strokeStyle=index<=strokeIndex?'rgba(255,255,255,.86)':'rgba(255,255,255,.34)';ctx.lineWidth=9;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([])
+      data.strokes.forEach((item,index)=>{path(item.points);const revealing=index===transitionNextIndex;ctx.strokeStyle=index<=strokeIndex?'rgba(255,255,255,.86)':revealing?`rgba(255,255,255,${.34+.52*transitionReveal})`:'rgba(255,255,255,.34)';ctx.lineWidth=9;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([])
       const shade=shadeCanvas.current||(shadeCanvas.current=document.createElement('canvas'))
       if(shade.width!==canvas.width||shade.height!==canvas.height){shade.width=canvas.width;shade.height=canvas.height}
       const shadeContext=shade.getContext('2d')!;shadeContext.setTransform(dpr,0,0,dpr,0,0);shadeContext.clearRect(0,0,w,h);shadeContext.fillStyle='rgba(42,66,142,.48)';shadeContext.fillRect(0,0,w,h);shadeContext.globalCompositeOperation='destination-out';shadeContext.lineWidth=92*Math.max(.72,size/720);shadeContext.lineCap='round';shadeContext.lineJoin='round'
       screenStrokes.slice(0,strokeIndex+1).forEach(points=>{shadeContext.beginPath();points.forEach((p,i)=>i?shadeContext.lineTo(p[0],p[1]):shadeContext.moveTo(p[0],p[1]));shadeContext.stroke()})
+      if(transitionNextIndex!==null){shadeContext.globalAlpha=transitionReveal;const nextPoints=screenStrokes[transitionNextIndex];shadeContext.beginPath();nextPoints.forEach((p,i)=>i?shadeContext.lineTo(p[0],p[1]):shadeContext.moveTo(p[0],p[1]));shadeContext.stroke();shadeContext.globalAlpha=1}
       shadeContext.globalCompositeOperation='source-over';ctx.drawImage(shade,0,0,w,h)
     }
-    if (level!==1) { data.strokes.forEach((s,i)=>{path(s.points);ctx.strokeStyle=i<strokeIndex?'#56baa7':i===strokeIndex?'rgba(108,86,223,.55)':'rgba(108,86,223,.18)';ctx.lineWidth=10;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([]) }
+    if (level!==1) { data.strokes.forEach((s,i)=>{path(s.points);ctx.strokeStyle=transitionNextIndex!==null?(i<=strokeIndex?'#56baa7':i===transitionNextIndex?`rgba(108,86,223,${.18+.37*transitionReveal})`:'rgba(108,86,223,.18)'):i<strokeIndex?'#56baa7':i===strokeIndex?'rgba(108,86,223,.55)':'rgba(108,86,223,.18)';ctx.lineWidth=10;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([]) }
     completedTraces.current.forEach(points=>{if(points.length>1){path(points,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()}})
     if (trace.current.length>1) { path(trace.current,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash([]);ctx.stroke() }
     if (finger) { ctx.fillStyle='#ffe05b';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(finger[0],finger[1],11,0,Math.PI*2);ctx.fill();ctx.stroke() }
+    const drawGo=(position:Point,color:string,opacity=1)=>{ctx.save();ctx.globalAlpha=opacity;ctx.shadowColor=color==='#30a992'?'rgba(48,169,146,.72)':'rgba(108,86,223,.72)';ctx.shadowBlur=15;ctx.fillStyle=color;ctx.strokeStyle='white';ctx.lineWidth=5;ctx.beginPath();ctx.arc(position[0],position[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0;ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',position[0],position[1]+4);ctx.restore()}
     if (!complete&&stroke) { const start=point(stroke.points[0]), end=point(stroke.points.at(-1)!), now=performance.now()
       if(level===3&&traceState.current==='WAITING'&&hintAge>=10&&!goHintShown.current){goHintShown.current=true;setMessage('Hint: begin at the green Go spot')}
       if(level===3&&!advancedHintShown.current&&((traceState.current==='WAITING'&&hintAge>=20)||(traceState.current==='TRACING'&&now-lastProgressAt.current>=10000))){advancedHintShown.current=true;setMessage('Need help? Follow the green guide to END')}
@@ -149,8 +154,9 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
         guideProgress.current=Math.min(metrics.total,userProgress.current+lead)
         const guide=pointAtDistance(screenStrokes[strokeIndex],metrics.lengths,metrics.cumulative,guideProgress.current);ctx.shadowColor='#79e7ba';ctx.shadowBlur=18;ctx.fillStyle='#4ed3a0';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(guide[0],guide[1],13,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0
       }
-      if (showStart) { ctx.save();ctx.shadowColor=level===3?'rgba(48,169,146,.72)':'rgba(108,86,223,.72)';ctx.shadowBlur=15;ctx.fillStyle=level===3?'#30a992':'#6c56df';ctx.strokeStyle='white';ctx.lineWidth=5;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0;ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4);ctx.restore() }
+      if (showStart) drawGo(start,level===3?'#30a992':'#6c56df')
     }
+    if(transitionNextIndex!==null) drawGo(screenStrokes[transitionNextIndex][0],'#6c56df',transitionReveal)
   },[cameraOn,complete,data,hintAge,level,strokeIndex])
 
   const addPoint = useCallback((p: Point, pointing=true) => {
@@ -173,7 +179,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
       if(userProgress.current>=metrics.total-12*scale&&Math.hypot(p[0]-end[0],p[1]-end[1])<=16*scale){
         trace.current.push(end);completedTraces.current.push([...trace.current]);trace.current=[];previousPoint.current=null;userProgress.current=0;guideProgress.current=0;lastMeaningfulProgress.current=0
         const next=activeIndex+1
-        if(next===data.strokes.length){strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';setComplete(true);setMessage(`Amazing! Look at the ${symbol} you created!`);onComplete()} else {traceState.current='TRANSITION';setTransitioning(true);setMessage(`Wonderful stroke ${next}! Pause and look at what you made…`);transitionTimer.current=window.setTimeout(()=>{strokeIndexRef.current=next;setHintAge(0);setStrokeIndex(next);traceState.current='WAITING';goHintShown.current=false;advancedHintShown.current=false;setTransitioning(false);setMessage(level===3?`Ready? Find the start of stroke ${next+1}`:`Ready? Find Go for stroke ${next+1}`);startedAt.current=performance.now();lastProgressAt.current=startedAt.current;transitionTimer.current=null},1000)}
+        if(next===data.strokes.length){strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';setComplete(true);setMessage(`Amazing! Look at the ${symbol} you created!`);onComplete()} else {traceState.current='TRANSITION';transitionStartedAt.current=performance.now();setTransitioning(true);setMessage(`Wonderful stroke ${next}! Pause and look at what you made…`);transitionTimer.current=window.setTimeout(()=>{strokeIndexRef.current=next;setHintAge(0);setStrokeIndex(next);traceState.current='WAITING';goHintShown.current=false;advancedHintShown.current=false;setTransitioning(false);setMessage(level===3?`Ready? Find the start of stroke ${next+1}`:`Ready? Find Go for stroke ${next+1}`);startedAt.current=performance.now();lastProgressAt.current=startedAt.current;transitionTimer.current=null},1000)}
       }
     } else { previousPoint.current=null }
   },[complete,data,level,onComplete,symbol])
@@ -239,5 +245,5 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
   },[])
   const pointer=(e:React.PointerEvent<HTMLCanvasElement>)=>{if(e.buttons===1||e.pointerType==='touch'){const b=e.currentTarget.getBoundingClientRect();addPoint([e.clientX-b.left,e.clientY-b.top],true)}}
   const endPointer=()=>{previousPoint.current=null}
-  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Level {level}</span><b>{levelInfo[level].title}</b></div><button onClick={reset}><RotateCcw/> Start over</button></header><section className="practice-layout"><aside aria-label={`Stroke order for ${symbol}`}><div className="quest-visuals"><div className="big-symbol">{symbol}</div><div className="finger-cue" role="img" aria-label="Point one finger">☝️</div></div><div className="step-list">{data?.strokes.map((s,i)=>{const done=i<strokeIndex||(transitioning&&i===strokeIndex);return <div className={`stroke-step ${done?'done':i===strokeIndex?'active':''}`} key={`${s.name}-${i}`}><span>{done?'✓':i+1}</span><StrokePreview points={s.points}/></div>})}</div></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><MousePointer2 size={16}/> Mouse or touch</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef} onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);pointer(e)}} onPointerMove={pointer} onPointerUp={endPointer} onPointerCancel={endPointer}/></div>{complete&&<div className="celebrate"><span>★</span><div><h2>Brilliant sky writing!</h2><p>Take a look at the {symbol} your strokes created.</p></div><button className="primary" onClick={goBack}>Collect your stars <Star size={18}/></button></div>}<div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn||cameraStarting}><Camera/>{cameraOn?'Camera is on':cameraStarting?'Starting camera…':'Turn on air writing'}</button><p><LockKeyhole size={15}/> Your camera stays on this device.</p></div></div></section></main>
+  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Level {level}</span><b>{levelInfo[level].title}</b></div><button onClick={reset}><RotateCcw/> Start over</button></header><section className="practice-layout"><aside aria-label={`Stroke order for ${symbol}`}><div className="quest-visuals"><div className="big-symbol">{symbol}</div><div className="finger-cue" role="img" aria-label="Point one finger">☝️</div></div><div className="step-list">{data?.strokes.map((s,i)=>{const done=i<strokeIndex||(transitioning&&i===strokeIndex),upNext=transitioning&&i===strokeIndex+1;return <div className={`stroke-step ${done?'done':upNext?'up-next':i===strokeIndex?'active':''}`} key={`${s.name}-${i}`}><span>{done?'✓':i+1}</span><StrokePreview points={s.points}/></div>})}</div></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><MousePointer2 size={16}/> Mouse or touch</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef} onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);pointer(e)}} onPointerMove={pointer} onPointerUp={endPointer} onPointerCancel={endPointer}/></div>{complete&&<div className="celebrate"><span>★</span><div><h2>Brilliant sky writing!</h2><p>Take a look at the {symbol} your strokes created.</p></div><button className="primary" onClick={goBack}>Collect your stars <Star size={18}/></button></div>}<div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn||cameraStarting}><Camera/>{cameraOn?'Camera is on':cameraStarting?'Starting camera…':'Turn on air writing'}</button><p><LockKeyhole size={15}/> Your camera stays on this device.</p></div></div></section></main>
 }

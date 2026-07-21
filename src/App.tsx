@@ -271,9 +271,11 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
   const expectedStrokeCount = useRef(1), repositionGuard = useRef<{ active: boolean; samples: Point[] }>({ active: false, samples: [] }), coverageCheckAt = useRef(0)
   const referenceData = useRef<StrokeData | null>(null), cameraOnRef = useRef(false), taskStartedAt = useRef<number | null>(null), drawingRevision = useRef(0)
   const guidanceShownRef = useRef(false), guidanceFailureRecorded = useRef(false), guidedNext = useRef<Challenge | null>(null)
-  const guidanceStrokeIndex = useRef(0), guidanceProgress = useRef(0), guidanceTransitionStartedAt = useRef<number | null>(null)
+  const guidanceStrokeIndex = useRef(0), guidanceProgress = useRef(0), guidanceTraceState = useRef<'WAITING' | 'TRACING' | 'TRANSITION' | 'COMPLETE'>('WAITING')
+  const guidanceTrace = useRef<Point[]>([]), guidanceCompletedTraces = useRef<Point[][]>([]), guidancePreviousPoint = useRef<Point | null>(null), guidanceTransitionTimer = useRef<number | null>(null)
   const [cameraOn, setCameraOn] = useState(false), [cameraStarting, setCameraStarting] = useState(false), [guidanceShown, setGuidanceShown] = useState(false)
   const [reference, setReference] = useState<StrokeData | null>(null)
+  const [guidedStrokeIndex, setGuidedStrokeIndex] = useState(0), [guidedTransitioning, setGuidedTransitioning] = useState(false), [guidedComplete, setGuidedComplete] = useState(false)
   const [message, setMessage] = useState('Turn on air writing, then write the character shown at left.')
 
   const finishStroke = useCallback(() => {
@@ -294,7 +296,14 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
     lastRecognitionAt.current = 0
     guidanceStrokeIndex.current = 0
     guidanceProgress.current = 0
-    guidanceTransitionStartedAt.current = null
+    guidanceTraceState.current = 'WAITING'
+    guidanceTrace.current = []
+    guidanceCompletedTraces.current = []
+    guidancePreviousPoint.current = null
+    if (guidanceTransitionTimer.current !== null) { window.clearTimeout(guidanceTransitionTimer.current); guidanceTransitionTimer.current = null }
+    setGuidedStrokeIndex(0)
+    setGuidedTransitioning(false)
+    setGuidedComplete(false)
     hasInk.current = false
     passed.current = false
     recognitionBusy.current = false
@@ -390,6 +399,7 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
   }, [attemptMetrics, finishStroke, onComplete, onNext, sessionMode, symbol])
 
   const acceptIntentPoint = useCallback((point: Point, drawing: boolean) => {
+    if (guidanceShownRef.current) return
     if (!drawing) { finishStroke(); return }
     const previous = activeStroke.current.at(-1)
     const box = canvasRef.current?.getBoundingClientRect(), minimum = box ? Math.min(box.width, box.height) : 600
@@ -438,6 +448,73 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
     }
   }, [assessDrawing, finishStroke, resetFailedDrawing, symbol])
 
+  const completeGuidedAttempt = useCallback(() => {
+    if (passed.current) return
+    passed.current = true
+    hasInk.current = false
+    guidanceTraceState.current = 'COMPLETE'
+    let next = guidedNext.current
+    if (!next) next = onComplete(attemptMetrics(true, 1)).next
+    guidedNext.current = next
+    setGuidedComplete(true)
+    setMessage(`Amazing! You traced every stroke of ${symbol}. This reminder try is complete.`)
+  }, [attemptMetrics, onComplete, symbol])
+
+  const acceptGuidedPoint = useCallback((point: Point, drawing: boolean) => {
+    const data = referenceData.current, canvas = canvasRef.current
+    if (!guidanceShownRef.current || !data || !canvas || passed.current || guidanceTraceState.current === 'COMPLETE') return
+    if (!drawing) { guidancePreviousPoint.current = null; return }
+    if (guidanceTraceState.current === 'TRANSITION') return
+    const box = canvas.getBoundingClientRect(), size = Math.min(box.width, box.height) * .86, ox = (box.width - size) / 2, oy = (box.height - size) / 2
+    const scale = Math.max(.72, size / 720), activeIndex = guidanceStrokeIndex.current
+    const points = data.strokes[activeIndex].points.map(([x, y]) => [ox + x * size, oy + y * size] as Point)
+    const metrics = polylineMetrics(points), start = points[0], end = points.at(-1)!
+    if (guidanceTraceState.current === 'WAITING') {
+      if (Math.hypot(point[0] - start[0], point[1] - start[1]) <= 36 * scale) {
+        guidanceTraceState.current = 'TRACING'
+        guidanceProgress.current = 0
+        guidancePreviousPoint.current = point
+        guidanceTrace.current = [start]
+        hasInk.current = true
+        lastMeaningfulAt.current = performance.now()
+        setMessage(`Stroke ${activeIndex + 1} of ${data.strokes.length}: follow the path all the way to END.`)
+      }
+      return
+    }
+    const nearest = nearestProgress(point, points, metrics.lengths, metrics.cumulative, Math.max(0, guidanceProgress.current - 20 * scale), Math.min(metrics.total, guidanceProgress.current + 55 * scale))
+    if (nearest.distance > 55 * scale) { guidancePreviousPoint.current = null; return }
+    guidanceProgress.current = Math.max(guidanceProgress.current, nearest.progress)
+    const previous = guidancePreviousPoint.current
+    if (!previous || Math.hypot(point[0] - previous[0], point[1] - previous[1]) >= 1.5) guidanceTrace.current.push(point)
+    guidancePreviousPoint.current = point
+    lastMeaningfulAt.current = performance.now()
+    if (guidanceProgress.current < metrics.total - 12 * scale || Math.hypot(point[0] - end[0], point[1] - end[1]) > 16 * scale) return
+    guidanceTrace.current.push(end)
+    guidanceCompletedTraces.current.push([...guidanceTrace.current])
+    guidanceTrace.current = []
+    guidancePreviousPoint.current = null
+    guidanceProgress.current = 0
+    const next = activeIndex + 1
+    if (next === data.strokes.length) {
+      guidanceStrokeIndex.current = next
+      setGuidedStrokeIndex(next)
+      completeGuidedAttempt()
+      return
+    }
+    guidanceTraceState.current = 'TRANSITION'
+    setGuidedTransitioning(true)
+    setMessage(`Wonderful stroke ${next}! Pause and look at what you made…`)
+    guidanceTransitionTimer.current = window.setTimeout(() => {
+      guidanceStrokeIndex.current = next
+      setGuidedStrokeIndex(next)
+      guidanceTraceState.current = 'WAITING'
+      setGuidedTransitioning(false)
+      lastMeaningfulAt.current = performance.now()
+      setMessage(`Ready? Touch GO to begin stroke ${next + 1}.`)
+      guidanceTransitionTimer.current = null
+    }, 1000)
+  }, [completeGuidedAttempt])
+
   const draw = useCallback((finger?: Point) => {
     const canvas = canvasRef.current, video = videoRef.current
     if (!canvas) return
@@ -479,23 +556,18 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
       const end = points.at(-1)!; ctx.lineTo(end[0], end[1])
       ctx.strokeStyle = '#ef6d9e'; ctx.lineWidth = 24; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.stroke()
     }
-    strokes.current.forEach(renderStroke); renderStroke(trimStartupNoise(activeStroke.current, symbol, Math.min(w, h)))
-    if (guidanceShownRef.current && referenceData.current?.strokes.length) {
+    if (guidanceShownRef.current) {
+      guidanceCompletedTraces.current.forEach(renderStroke)
+      renderStroke(guidanceTrace.current)
+    } else {
+      strokes.current.forEach(renderStroke)
+      renderStroke(trimStartupNoise(activeStroke.current, symbol, Math.min(w, h)))
+    }
+    if (guidanceShownRef.current && referenceData.current?.strokes.length && !guidedComplete) {
       const size = Math.min(w, h) * .86, ox = (w - size) / 2, oy = (h - size) / 2
       const screenStrokes = referenceData.current.strokes.map(stroke => stroke.points.map(([x, y]) => [ox + x * size, oy + y * size] as Point))
-      const now = performance.now()
-      if (guidanceTransitionStartedAt.current !== null && now - guidanceTransitionStartedAt.current >= 1000 && guidanceStrokeIndex.current < screenStrokes.length - 1) {
-        guidanceStrokeIndex.current += 1
-        guidanceProgress.current = 0
-        guidanceTransitionStartedAt.current = null
-      }
       const active = screenStrokes[Math.min(guidanceStrokeIndex.current, screenStrokes.length - 1)], metrics = polylineMetrics(active)
       const start = active[0], end = active.at(-1)!, scale = Math.max(.72, size / 720)
-      if (finger && guidanceTransitionStartedAt.current === null) {
-        const nearest = nearestProgress(finger, active, metrics.lengths, metrics.cumulative, Math.max(0, guidanceProgress.current - 20 * scale), Math.min(metrics.total, guidanceProgress.current + 90 * scale))
-        if (nearest.distance <= 55 * scale) guidanceProgress.current = Math.max(guidanceProgress.current, nearest.progress)
-        if (guidanceProgress.current >= metrics.total - 12 * scale && Math.hypot(finger[0] - end[0], finger[1] - end[1]) <= 18 * scale) guidanceTransitionStartedAt.current = now
-      }
       const first = active[0], last = active.at(-1)!, mostlyVertical = Math.abs(last[1] - first[1]) > Math.abs(last[0] - first[0])
       const movingUp = mostlyVertical && last[1] < first[1], movingDown = mostlyVertical && last[1] > first[1]
       const lead = (movingUp ? 44 : movingDown ? 36 : 46) * scale
@@ -504,15 +576,17 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
         ctx.fillStyle = '#30a992'; ctx.strokeStyle = 'white'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(position[0], position[1], radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
         if (label) { ctx.fillStyle = 'white'; ctx.font = '800 9px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(label, position[0], position[1] + 3) }
       }
-      if (guidanceProgress.current < metrics.total * .04) circle(start, 20, 'GO')
-      circle(end, 21, 'END')
-      ctx.save(); ctx.shadowColor = '#79e7ba'; ctx.shadowBlur = 18; circle(guide, 13); ctx.restore()
+      if (guidanceTraceState.current === 'WAITING') circle(start, 20, 'GO')
+      if (guidanceTraceState.current === 'TRACING') {
+        circle(end, 21, 'END')
+        ctx.save(); ctx.shadowColor = '#79e7ba'; ctx.shadowBlur = 18; circle(guide, 13); ctx.restore()
+      }
     }
     if (finger) {
       ctx.fillStyle = '#ffe05b'; ctx.strokeStyle = 'white'; ctx.lineWidth = 4
       ctx.beginPath(); ctx.arc(finger[0], finger[1], 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
     }
-  }, [cameraOn, symbol])
+  }, [cameraOn, guidedComplete, symbol])
 
   const startCamera = async () => {
     setCameraStarting(true); setMessage('Starting camera and smart drawing filter…')
@@ -566,11 +640,16 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
             } else smoothedPoint.current = raw
             finger = smoothedPoint.current
             const queuedPoint: Point = [finger[0], finger[1]], fallbackDrawing = isPointingHand(hand), model = intentModel.current
-            if (model) intentQueue.current = intentQueue.current.then(async () => {
+            if (guidanceShownRef.current) acceptGuidedPoint(queuedPoint, fallbackDrawing)
+            else if (model) intentQueue.current = intentQueue.current.then(async () => {
               const ready = await model.process(hand, queuedPoint, fallbackDrawing, timestamp)
               ready.forEach(item => acceptIntentPoint(item.point, item.drawing))
             }).catch(error => console.error('SkyWrite free-write filtering failed.', error))
-          } else { smoothedPoint.current = null; finishStroke(); intentModel.current?.reset() }
+          } else {
+            smoothedPoint.current = null
+            if (guidanceShownRef.current) guidancePreviousPoint.current = null
+            else { finishStroke(); intentModel.current?.reset() }
+          }
         } catch (error) { console.error('SkyWrite free-write hand tracking failed.', error) }
       }
       draw(finger)
@@ -578,39 +657,73 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
     }
     loop()
     return () => { stopped = true; cancelAnimationFrame(raf.current) }
-  }, [acceptIntentPoint, cameraOn, draw, finishStroke])
+  }, [acceptGuidedPoint, acceptIntentPoint, cameraOn, draw, finishStroke])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       const now = performance.now()
       if (!passed.current && cameraOnRef.current && taskStartedAt.current !== null && !guidanceShownRef.current && now - taskStartedAt.current >= 30000) {
+        const feedback = sessionMode === 'learning' && !guidanceFailureRecorded.current ? recordFailure() : null
+        clearDrawing()
         guidanceShownRef.current = true
         guidanceStrokeIndex.current = 0
         guidanceProgress.current = 0
-        guidanceTransitionStartedAt.current = null
+        guidanceTraceState.current = 'WAITING'
         setGuidanceShown(true)
         if (sessionMode === 'learning' && !guidanceFailureRecorded.current) {
-          const feedback = recordFailure()
           guidanceFailureRecorded.current = true
           guidedNext.current = feedback?.next ?? null
         }
-        setMessage(`Here's a reminder—follow the dotted ${symbol} and the stroke arrows.`)
+        setMessage(`Here's a reminder—touch GO to begin stroke 1.`)
       }
       if (hasInk.current && !passed.current && now - lastMeaningfulAt.current >= 15000) {
         resetFailedDrawing(`Let's try ${symbol} again—the board was cleared after a 15-second pause.`)
       }
     }, 500)
     return () => window.clearInterval(timer)
-  }, [recordFailure, resetFailedDrawing, sessionMode, symbol])
+  }, [clearDrawing, recordFailure, resetFailedDrawing, sessionMode, symbol])
 
   useEffect(() => () => {
     cameraOnRef.current = false
     ;(videoRef.current?.srcObject as MediaStream | null)?.getTracks().forEach(track => track.stop())
     landmarker.current?.close(); void intentModel.current?.release(); void symbolModel.current?.release()
     if (advanceTimer.current !== null) window.clearTimeout(advanceTimer.current)
+    if (guidanceTransitionTimer.current !== null) window.clearTimeout(guidanceTransitionTimer.current)
   }, [])
 
-  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> {sessionMode === 'learning' ? 'End session' : 'Dashboard'}</button><div className="practice-title"><span>{sessionMode === 'learning' ? 'Learning path' : 'Free practice'} · Level 4</span><b>{symbol} · Free write</b></div><button onClick={manuallyClear}><RotateCcw/> Clear drawing</button></header><section className="practice-layout freewrite-layout"><aside aria-label={guidanceShown ? `Stroke reminder for ${symbol}` : `Character to free-write: ${symbol}`}><div className="session-badge">{sessionMode === 'learning' ? <><Trophy size={15}/>{masteredCount}/62 mastered</> : <><Star size={15}/>Practice only</>}</div>{guidanceShown ? <><div className="quest-visuals"><div className="big-symbol">{symbol}</div><div className="finger-cue" role="img" aria-label="Point one finger">☝️</div></div><div className="step-list">{reference?.strokes.map((stroke, index) => <div className="stroke-step active guidance-step" key={`${stroke.name}-${index}`}><span>{index + 1}</span><StrokePreview points={stroke.points}/></div>)}</div><p className="freewrite-copy">Follow the dotted letter and each arrow to finish this reminder try.</p></> : <><p className="freewrite-label">WRITE THIS CHARACTER</p><div className="freewrite-target">{symbol}</div><p className="freewrite-copy">Write from memory with one raised finger. A tracing reminder appears after 30 seconds.</p></>}{sessionMode === 'practice' && <button className="primary freewrite-next" onClick={() => onNext({ symbol: randomPracticeSymbol(symbol), level: 4 })}>Try another<ChevronRight size={18}/></button>}</aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><Sparkles size={16}/> Delayed intent smoothing</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef}/></div><div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn || cameraStarting}><Camera/>{cameraOn ? 'Camera is on' : cameraStarting ? 'Starting Free Write…' : 'Turn on Free Write'}</button><p><LockKeyhole size={15}/> The model and camera stay on this device.</p></div></div></section></main>
+  return <main className="practice-shell">
+    <header className="practice-nav">
+      <button onClick={goBack}><ArrowLeft/> {sessionMode === 'learning' ? 'End session' : 'Dashboard'}</button>
+      <div className="practice-title"><span>{sessionMode === 'learning' ? 'Learning path' : 'Free practice'} · Level 4</span><b>{symbol} · Free write</b></div>
+      <button onClick={manuallyClear}><RotateCcw/> Clear drawing</button>
+    </header>
+    <section className="practice-layout freewrite-layout">
+      <aside aria-label={guidanceShown ? `Stroke reminder for ${symbol}` : `Character to free-write: ${symbol}`}>
+        <div className="session-badge">{sessionMode === 'learning' ? <><Trophy size={15}/>{masteredCount}/62 mastered</> : <><Star size={15}/>Practice only</>}</div>
+        {guidanceShown ? <>
+          <div className="quest-visuals"><div className="big-symbol">{symbol}</div><div className="finger-cue" role="img" aria-label="Point one finger">☝️</div></div>
+          <div className="step-list">{reference?.strokes.map((stroke, index) => {
+            const done = guidedComplete || index < guidedStrokeIndex || (guidedTransitioning && index === guidedStrokeIndex)
+            const upNext = guidedTransitioning && index === guidedStrokeIndex + 1
+            return <div className={`stroke-step guidance-step ${done ? 'done' : upNext ? 'up-next' : index === guidedStrokeIndex ? 'active' : ''}`} key={`${stroke.name}-${index}`}><span>{done ? '✓' : index + 1}</span><StrokePreview points={stroke.points}/></div>
+          })}</div>
+          <p className="freewrite-copy">Touch GO, follow the correct path to END, then wait for the next GO.</p>
+        </> : <>
+          <p className="freewrite-label">WRITE THIS CHARACTER</p><div className="freewrite-target">{symbol}</div>
+          <p className="freewrite-copy">Write from memory with one raised finger. A tracing reminder appears after 30 seconds.</p>
+        </>}
+        {sessionMode === 'practice' && <button className="primary freewrite-next" onClick={() => onNext({ symbol: randomPracticeSymbol(symbol), level: 4 })}>Try another<ChevronRight size={18}/></button>}
+      </aside>
+      <div className="studio">
+        <div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode">{guidanceShown ? <><MousePointer2 size={16}/> Guided tracing</> : <><Sparkles size={16}/> Delayed intent smoothing</>}</div></div>
+        <div className="camera-stage">
+          <video ref={videoRef} playsInline muted/><canvas ref={canvasRef}/>
+          {guidedComplete && <div className="celebrate"><span><Check/></span><div><h2>Reminder complete!</h2><p>Look at the {symbol} you made by following every stroke.</p></div><button className="primary" disabled={!guidedNext.current} onClick={() => guidedNext.current && onNext(guidedNext.current)}>{sessionMode === 'learning' ? 'Next letter' : 'Next random letter'}<b>{guidedNext.current?.symbol}</b><ChevronRight size={18}/></button></div>}
+        </div>
+        <div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn || cameraStarting}><Camera/>{cameraOn ? 'Camera is on' : cameraStarting ? 'Starting Free Write…' : 'Turn on Free Write'}</button><p><LockKeyhole size={15}/> The model and camera stay on this device.</p></div>
+      </div>
+    </section>
+  </main>
 }
 
 function Practice({ level, symbol, challengeId, sessionMode, masteredCount, goBack, onComplete, onNext }: { level: Level; symbol: string; challengeId: number; sessionMode: SessionMode; masteredCount: number; goBack: () => void; onComplete: (metrics: AttemptMetrics) => CompletionFeedback; onNext: (challenge: Challenge) => void }) {

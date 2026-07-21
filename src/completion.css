@@ -1,0 +1,49 @@
+.celebrate {
+  margin-top: 14px;
+  padding: 16px 18px;
+  position: static;
+  inset: auto;
+  display: flex;
+  place-content: normal;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid #ded6ff;
+  border-radius: 18px;
+  background: #f1edff;
+  color: #2b2457;
+  text-align: left;
+}
+
+.celebrate > span {
+  color: #e9ad24;
+  font-size: 34px;
+}
+
+.celebrate h2 {
+  margin: 0 0 2px;
+  font: 700 21px Fredoka, sans-serif;
+}
+
+.celebrate p {
+  margin: 0;
+  color: #716987;
+  font-size: 12px;
+}
+
+.celebrate .primary {
+  margin: 0 0 0 auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .celebrate {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .celebrate .primary {
+    width: 100%;
+    margin-left: 0;
+    justify-content: center;
+  }
+}

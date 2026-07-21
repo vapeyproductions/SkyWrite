@@ -111,8 +111,8 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
     }
     const showPath=level===1 || (level===3 && hintAge>=15)
     if (showPath&&level!==1) { data.strokes.forEach((s,i)=>{path(s.points);ctx.strokeStyle=i<strokeIndex?'#56baa7':i===strokeIndex?'rgba(108,86,223,.55)':'rgba(108,86,223,.18)';ctx.lineWidth=10;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([]) }
-    completedTraces.current.forEach(points=>{if(points.length>1){path(points,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=18;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()}})
-    if (trace.current.length>1) { path(trace.current,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=18;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash([]);ctx.stroke() }
+    completedTraces.current.forEach(points=>{if(points.length>1){path(points,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()}})
+    if (trace.current.length>1) { path(trace.current,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash([]);ctx.stroke() }
     if (!complete&&stroke) { const start=point(stroke.points[0]), end=point(stroke.points.at(-1)!)
       if ((level===1&&traceState.current==='WAITING') || (level===3&&hintAge>=5)) { ctx.fillStyle='#6c56df';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4) }
       if ((level===1&&traceState.current==='TRACING') || (level===3&&hintAge>=15)) { ctx.fillStyle='#30a992';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(end[0],end[1],21,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 9px sans-serif';ctx.textAlign='center';ctx.fillText('END',end[0],end[1]+3) }
@@ -195,7 +195,12 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
         lastVideoTime=video.currentTime
         try {
           const result=landmarker.current.detectForVideo(video,performance.now()), hand=result.landmarks[0], tip=hand?.[8]
-          if(tip && canvasRef.current){const b=canvasRef.current.getBoundingClientRect(),raw:Point=[(1-tip.x)*b.width,tip.y*b.height];smoothedPoint.current=smoothedPoint.current?[.25*raw[0]+.75*smoothedPoint.current[0],.25*raw[1]+.75*smoothedPoint.current[1]]:raw;finger=smoothedPoint.current;addPoint(finger,level===1?isPointingHand(hand):true)}
+          if(tip && canvasRef.current){
+            const b=canvasRef.current.getBoundingClientRect(),raw:Point=[(1-tip.x)*b.width,tip.y*b.height],previous=smoothedPoint.current
+            if(previous){const distance=Math.hypot(raw[0]-previous[0],raw[1]-previous[1]),alpha=distance>30?.46:distance>10?.27:.13;smoothedPoint.current=distance<3?previous:[previous[0]+alpha*(raw[0]-previous[0]),previous[1]+alpha*(raw[1]-previous[1])]}
+            else smoothedPoint.current=raw
+            finger=smoothedPoint.current;addPoint(finger,level===1?isPointingHand(hand):true)
+          }
           else {smoothedPoint.current=null;previousPoint.current=null}
         } catch (error) { console.error('SkyWrite hand tracking frame failed.',error) }
       }

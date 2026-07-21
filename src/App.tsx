@@ -42,6 +42,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
   const videoRef = useRef<HTMLVideoElement>(null), canvasRef = useRef<HTMLCanvasElement>(null)
   const landmarker = useRef<HandLandmarker | null>(null), raf = useRef(0), trace = useRef<Point[]>([])
   const [data, setData] = useState<StrokeData | null>(null), [cameraOn, setCameraOn] = useState(false)
+  const [cameraStarting, setCameraStarting] = useState(false)
   const [message, setMessage] = useState('Place your finger on the purple start dot'), [strokeIndex, setStrokeIndex] = useState(0)
   const [hintAge, setHintAge] = useState(0), [complete, setComplete] = useState(false)
   const startedAt = useRef(performance.now())
@@ -78,8 +79,58 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
     if (Math.hypot(p[0]-ep[0],p[1]-ep[1])<42 && trace.current.length>8) { trace.current=[]; if (strokeIndex===data.strokes.length-1) {setComplete(true);setMessage(`Amazing! You wrote ${symbol}!`);onComplete()} else {setStrokeIndex(i=>i+1);setMessage('Great! Find the next purple start dot');startedAt.current=performance.now()} }
   },[complete,data,onComplete,strokeIndex,symbol])
 
-  const startCamera=async()=>{ try { const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false});videoRef.current!.srcObject=stream;await videoRef.current!.play();const files=await FilesetResolver.forVisionTasks('/wasm');landmarker.current=await HandLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:'/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:1});setCameraOn(true);let last=-1;const loop=()=>{const v=videoRef.current!;let finger:Point|undefined;if(v.currentTime!==last&&v.readyState===4){last=v.currentTime;const result=landmarker.current!.detectForVideo(v,performance.now());const tip=result.landmarks[0]?.[8];if(tip){const b=canvasRef.current!.getBoundingClientRect();finger=[(1-tip.x)*b.width,tip.y*b.height];addPoint(finger)}}draw(finger);raf.current=requestAnimationFrame(loop)};loop()} catch {setMessage('Camera unavailable—use your mouse or finger instead.')} }
-  useEffect(()=>{draw();const id=requestAnimationFrame(function loop(){draw();raf.current=requestAnimationFrame(loop)});return()=>{cancelAnimationFrame(id);cancelAnimationFrame(raf.current);(videoRef.current?.srcObject as MediaStream|null)?.getTracks().forEach(t=>t.stop());landmarker.current?.close()}},[draw])
+  const startCamera=async()=>{
+    setCameraStarting(true)
+    setMessage('Starting your camera…')
+    let stream: MediaStream | null = null
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access is not supported by this browser.')
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false})
+      videoRef.current!.srcObject=stream
+      await videoRef.current!.play()
+      setMessage('Camera ready—starting hand tracking…')
+      const files=await FilesetResolver.forVisionTasks('/wasm')
+      const options=(delegate:'GPU'|'CPU')=>({baseOptions:{modelAssetPath:'/hand_landmarker.task',delegate},runningMode:'VIDEO' as const,numHands:1})
+      try {
+        landmarker.current=await HandLandmarker.createFromOptions(files,options('GPU'))
+      } catch (gpuError) {
+        console.warn('GPU hand tracking was unavailable; retrying on CPU.',gpuError)
+        landmarker.current=await HandLandmarker.createFromOptions(files,options('CPU'))
+      }
+      setCameraOn(true)
+      setMessage('Camera ready! Hold up one pointing finger and start writing.')
+    } catch (error) {
+      console.error('SkyWrite camera startup failed.',error)
+      stream?.getTracks().forEach(track=>track.stop())
+      if (videoRef.current) videoRef.current.srcObject=null
+      const name=error instanceof DOMException?error.name:''
+      if (name==='NotAllowedError') setMessage('Camera permission is blocked. Allow camera access in your browser settings, then try again.')
+      else if (name==='NotFoundError') setMessage('No camera was found. You can still write with a mouse or finger.')
+      else setMessage('The camera opened, but hand tracking could not start. Try refreshing or use Chrome/Safari.')
+    } finally { setCameraStarting(false) }
+  }
+  useEffect(()=>{
+    let stopped=false, lastVideoTime=-1
+    const loop=()=>{
+      let finger:Point|undefined
+      const video=videoRef.current
+      if(cameraOn && landmarker.current && video?.readyState===4 && video.currentTime!==lastVideoTime){
+        lastVideoTime=video.currentTime
+        try {
+          const result=landmarker.current.detectForVideo(video,performance.now()), tip=result.landmarks[0]?.[8]
+          if(tip && canvasRef.current){const b=canvasRef.current.getBoundingClientRect();finger=[(1-tip.x)*b.width,tip.y*b.height];addPoint(finger)}
+        } catch (error) { console.error('SkyWrite hand tracking frame failed.',error) }
+      }
+      draw(finger)
+      if(!stopped) raf.current=requestAnimationFrame(loop)
+    }
+    loop()
+    return()=>{stopped=true;cancelAnimationFrame(raf.current)}
+  },[addPoint,cameraOn,draw])
+  useEffect(()=>()=>{
+    (videoRef.current?.srcObject as MediaStream|null)?.getTracks().forEach(track=>track.stop())
+    landmarker.current?.close()
+  },[])
   const pointer=(e:React.PointerEvent<HTMLCanvasElement>)=>{if(e.buttons===1||e.pointerType==='touch'){const b=e.currentTarget.getBoundingClientRect();addPoint([e.clientX-b.left,e.clientY-b.top])}}
-  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Level {level}</span><b>{levelInfo[level].title}</b></div><button onClick={reset}><RotateCcw/> Start over</button></header><section className="practice-layout"><aside><p className="eyebrow">YOUR QUEST</p><div className="big-symbol">{symbol}</div><h2>Write the {/[0-9]/.test(symbol)?'number':'letter'} {symbol}</h2><p>{levelInfo[level].detail}</p><div className="step-list">{data?.strokes.map((s,i)=><div className={i<strokeIndex?'done':i===strokeIndex?'active':''} key={s.name}><span>{i<strokeIndex?'✓':i+1}</span><p><b>{s.name}</b><small>{i<strokeIndex?'Complete':i===strokeIndex?'Your turn':'Up next'}</small></p></div>)}</div></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><MousePointer2 size={16}/> Mouse or touch</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef} onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);pointer(e)}} onPointerMove={pointer}/>{complete&&<div className="celebrate"><span>★</span><h2>Brilliant sky writing!</h2><p>You completed {symbol} on Level {level}.</p><button className="primary" onClick={goBack}>Collect your stars <Star size={18}/></button></div>}</div><div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn}><Camera/>{cameraOn?'Camera is on':'Turn on air writing'}</button><p><LockKeyhole size={15}/> Your camera stays on this device.</p></div></div></section></main>
+  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Level {level}</span><b>{levelInfo[level].title}</b></div><button onClick={reset}><RotateCcw/> Start over</button></header><section className="practice-layout"><aside><p className="eyebrow">YOUR QUEST</p><div className="big-symbol">{symbol}</div><h2>Write the {/[0-9]/.test(symbol)?'number':'letter'} {symbol}</h2><p>{levelInfo[level].detail}</p><div className="step-list">{data?.strokes.map((s,i)=><div className={i<strokeIndex?'done':i===strokeIndex?'active':''} key={s.name}><span>{i<strokeIndex?'✓':i+1}</span><p><b>{s.name}</b><small>{i<strokeIndex?'Complete':i===strokeIndex?'Your turn':'Up next'}</small></p></div>)}</div></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><MousePointer2 size={16}/> Mouse or touch</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef} onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);pointer(e)}} onPointerMove={pointer}/>{complete&&<div className="celebrate"><span>★</span><h2>Brilliant sky writing!</h2><p>You completed {symbol} on Level {level}.</p><button className="primary" onClick={goBack}>Collect your stars <Star size={18}/></button></div>}</div><div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn||cameraStarting}><Camera/>{cameraOn?'Camera is on':cameraStarting?'Starting camera…':'Turn on air writing'}</button><p><LockKeyhole size={15}/> Your camera stays on this device.</p></div></div></section></main>
 }

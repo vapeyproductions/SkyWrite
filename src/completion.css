@@ -35,6 +35,10 @@
   white-space: nowrap;
 }
 
+.celebrate.strong-result > span {
+  color: #258b78;
+}
+
 @media (max-width: 620px) {
   .celebrate {
     align-items: flex-start;

@@ -1,0 +1,10 @@
+SkyWrite
+Copyright 2026 Eva Moughan
+
+SkyWrite includes work adapted from the Apache-2.0-licensed
+mediapipe_gesture_recognition project by Joey Musante:
+https://github.com/jrmusan/mediapipe_gesture_recognition
+
+SkyWrite also uses third-party packages and model assets, including MediaPipe,
+ONNX Runtime Web, React, Vite, TypeScript, and Lucide. Those components retain
+their respective copyright notices and licenses.

@@ -11,6 +11,42 @@ const levelInfo = {
 } satisfies Record<Level, { title: string; detail: string; color: string }>
 type Progress = Record<string, number>
 
+function polylineMetrics(points: Point[]) {
+  const lengths=points.slice(0,-1).map((point,index)=>Math.hypot(points[index+1][0]-point[0],points[index+1][1]-point[1]))
+  const cumulative=[0]
+  lengths.forEach(length=>cumulative.push(cumulative.at(-1)!+length))
+  return {lengths,cumulative,total:cumulative.at(-1)!}
+}
+
+function pointAtDistance(points: Point[], lengths: number[], cumulative: number[], target: number): Point {
+  const distance=Math.max(0,Math.min(target,cumulative.at(-1)!))
+  const found=cumulative.findIndex(value=>value>distance)
+  const index=found===-1?lengths.length-1:Math.max(0,found-1)
+  if(lengths[index]===0) return [...points[index]]
+  const amount=(distance-cumulative[index])/lengths[index]
+  return [points[index][0]+amount*(points[index+1][0]-points[index][0]),points[index][1]+amount*(points[index+1][1]-points[index][1])]
+}
+
+function nearestProgress(point: Point, points: Point[], lengths: number[], cumulative: number[], minimum: number, maximum: number) {
+  let bestDistance=Infinity, bestProgress=minimum
+  lengths.forEach((length,index)=>{
+    if(!length||cumulative[index+1]<minimum||cumulative[index]>maximum) return
+    const ax=points[index][0], ay=points[index][1], vx=points[index+1][0]-ax, vy=points[index+1][1]-ay
+    const amount=Math.max(0,Math.min(1,((point[0]-ax)*vx+(point[1]-ay)*vy)/(length*length)))
+    const progress=cumulative[index]+amount*length
+    if(progress<minimum||progress>maximum) return
+    const distance=Math.hypot(point[0]-(ax+amount*vx),point[1]-(ay+amount*vy))
+    if(distance<bestDistance){bestDistance=distance;bestProgress=progress}
+  })
+  return {distance:bestDistance,progress:bestProgress}
+}
+
+function isPointingHand(hand: Array<{x:number;y:number}>) {
+  const inside=(index:number)=>hand[index]&&hand[index].x>=0&&hand[index].x<=1&&hand[index].y>=0&&hand[index].y<=1
+  if(!inside(8)||hand[8].y>=hand[6].y) return false
+  return ([[10,12],[14,16],[18,20]] as const).every(([pip,tip])=>!inside(pip)||!inside(tip)||hand[tip].y>hand[pip].y)
+}
+
 export function App() {
   const [route, setRoute] = useState<'dashboard' | 'practice'>('dashboard')
   const [level, setLevel] = useState<Level>(1)
@@ -41,43 +77,83 @@ function Dashboard({ progress, symbol, setSymbol, start }: { progress: Progress;
 function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol: string; goBack: () => void; onComplete: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null), canvasRef = useRef<HTMLCanvasElement>(null)
   const landmarker = useRef<HandLandmarker | null>(null), raf = useRef(0), trace = useRef<Point[]>([])
+  const completedTraces = useRef<Point[][]>([]), traceState = useRef<'WAITING'|'TRACING'>('WAITING')
+  const userProgress = useRef(0), guideProgress = useRef(0), previousPoint = useRef<Point|null>(null)
+  const smoothedPoint = useRef<Point|null>(null), strokeIndexRef = useRef(0), lastDrawTime = useRef(performance.now())
+  const shadeCanvas = useRef<HTMLCanvasElement|null>(null)
   const [data, setData] = useState<StrokeData | null>(null), [cameraOn, setCameraOn] = useState(false)
   const [cameraStarting, setCameraStarting] = useState(false)
-  const [message, setMessage] = useState('Place your finger on the purple start dot'), [strokeIndex, setStrokeIndex] = useState(0)
+  const [message, setMessage] = useState('Place your finger on the purple Go spot'), [strokeIndex, setStrokeIndex] = useState(0)
   const [hintAge, setHintAge] = useState(0), [complete, setComplete] = useState(false)
   const startedAt = useRef(performance.now())
-  useEffect(() => { fetch(`/strokes_jsons/${symbol}_dotted.strokes.json`).then(r => r.json()).then(setData) }, [symbol])
+  useEffect(() => { fetch(`/strokes_jsons/${symbol}_dotted.strokes.json`).then(r => r.json()).then(value=>{setData(value);trace.current=[];completedTraces.current=[];traceState.current='WAITING';userProgress.current=0;guideProgress.current=0;previousPoint.current=null;strokeIndexRef.current=0;setStrokeIndex(0)}) }, [symbol])
   useEffect(() => { const id = window.setInterval(() => setHintAge((performance.now() - startedAt.current) / 1000), 250); return () => clearInterval(id) }, [strokeIndex])
-  const reset = useCallback(() => { trace.current=[]; setStrokeIndex(0); setComplete(false); setMessage('Place your finger on the purple start dot'); startedAt.current=performance.now() }, [])
+  const reset = useCallback(() => { trace.current=[];completedTraces.current=[];traceState.current='WAITING';userProgress.current=0;guideProgress.current=0;previousPoint.current=null;smoothedPoint.current=null;strokeIndexRef.current=0;setStrokeIndex(0);setComplete(false);setMessage('Place your finger on the purple Go spot');startedAt.current=performance.now();lastDrawTime.current=performance.now() }, [])
 
   const draw = useCallback((finger?: Point) => {
     const canvas=canvasRef.current, video=videoRef.current; if (!canvas || !data) return
     const box=canvas.getBoundingClientRect(), dpr=window.devicePixelRatio || 1
     if (canvas.width !== Math.round(box.width*dpr) || canvas.height !== Math.round(box.height*dpr)) { canvas.width=Math.round(box.width*dpr); canvas.height=Math.round(box.height*dpr) }
     const ctx=canvas.getContext('2d')!; ctx.setTransform(dpr,0,0,dpr,0,0); const w=box.width,h=box.height; ctx.clearRect(0,0,w,h)
-    if (cameraOn && video?.readyState === 4) { ctx.save(); ctx.scale(-1,1); ctx.drawImage(video,-w,0,w,h); ctx.restore(); ctx.fillStyle='rgba(25,18,54,.2)'; ctx.fillRect(0,0,w,h) }
-    else { const g=ctx.createLinearGradient(0,0,w,h); g.addColorStop(0,'#f6f2ff');g.addColorStop(1,'#e8fbf6');ctx.fillStyle=g;ctx.fillRect(0,0,w,h) }
+    const drawBase=()=>{if (cameraOn && video?.readyState === 4) { ctx.save();ctx.scale(-1,1);ctx.drawImage(video,-w,0,w,h);ctx.restore();ctx.fillStyle='rgba(25,18,54,.16)';ctx.fillRect(0,0,w,h) } else { const g=ctx.createLinearGradient(0,0,w,h);g.addColorStop(0,'#f6f2ff');g.addColorStop(1,'#e8fbf6');ctx.fillStyle=g;ctx.fillRect(0,0,w,h) }}
+    drawBase()
     const size=Math.min(w,h)*.86, ox=(w-size)/2, oy=(h-size)/2, point=(p:Point):Point=>[ox+p[0]*size,oy+p[1]*size]
     const stroke=data.strokes[Math.min(strokeIndex,data.strokes.length-1)]
-    const path=(pts:Point[])=>{ctx.beginPath();pts.forEach((p,i)=>{const [x,y]=point(p);i?ctx.lineTo(x,y):ctx.moveTo(x,y)})}
-    if (level===1) { ctx.fillStyle='rgba(96,80,190,.12)';ctx.fillRect(0,0,w,h);ctx.save();ctx.globalCompositeOperation='destination-out';data.strokes.slice(0,strokeIndex+1).forEach(s=>{path(s.points);ctx.lineWidth=84;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()});ctx.restore() }
-    const showPath=level===1 || (level===3 && hintAge>=15)
-    if (showPath) { data.strokes.forEach((s,i)=>{path(s.points);ctx.strokeStyle=i<strokeIndex?'#56baa7':i===strokeIndex?'rgba(108,86,223,.55)':'rgba(108,86,223,.18)';ctx.lineWidth=10;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([]) }
-    if (stroke) { const start=point(stroke.points[0]), end=point(stroke.points.at(-1)!)
-      if (level===1 || (level===3 && hintAge>=5)) { ctx.fillStyle='#6c56df';ctx.beginPath();ctx.arc(start[0],start[1],13,0,Math.PI*2);ctx.fill();ctx.fillStyle='white';ctx.font='700 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4) }
-      if (level===1 || (level===3 && hintAge>=15)) { ctx.strokeStyle='#30a992';ctx.lineWidth=4;ctx.beginPath();ctx.arc(end[0],end[1],14,0,Math.PI*2);ctx.stroke() }
-      if (level<=2 || (level===3 && hintAge>=15)) { const guide=point(stroke.points[Math.floor((Date.now()/180)%stroke.points.length)]);ctx.shadowColor='#ffcf55';ctx.shadowBlur=16;ctx.fillStyle='#ffcf55';ctx.beginPath();ctx.arc(guide[0],guide[1],10,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0 }
+    const screenStrokes=data.strokes.map(item=>item.points.map(point))
+    const path=(pts:Point[],screen=false)=>{ctx.beginPath();pts.forEach((p,i)=>{const [x,y]=screen?p:point(p);i?ctx.lineTo(x,y):ctx.moveTo(x,y)})}
+    if(level===1){
+      data.strokes.forEach((item,index)=>{path(item.points);ctx.strokeStyle=index<=strokeIndex?'rgba(255,255,255,.86)':'rgba(255,255,255,.34)';ctx.lineWidth=9;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([])
+      const shade=shadeCanvas.current||(shadeCanvas.current=document.createElement('canvas'))
+      if(shade.width!==canvas.width||shade.height!==canvas.height){shade.width=canvas.width;shade.height=canvas.height}
+      const shadeContext=shade.getContext('2d')!;shadeContext.setTransform(dpr,0,0,dpr,0,0);shadeContext.clearRect(0,0,w,h);shadeContext.fillStyle='rgba(42,66,142,.48)';shadeContext.fillRect(0,0,w,h);shadeContext.globalCompositeOperation='destination-out';shadeContext.lineWidth=92*Math.max(.72,size/720);shadeContext.lineCap='round';shadeContext.lineJoin='round'
+      screenStrokes.slice(0,strokeIndex+1).forEach(points=>{shadeContext.beginPath();points.forEach((p,i)=>i?shadeContext.lineTo(p[0],p[1]):shadeContext.moveTo(p[0],p[1]));shadeContext.stroke()})
+      shadeContext.globalCompositeOperation='source-over';ctx.drawImage(shade,0,0,w,h)
     }
-    if (trace.current.length>1) { path(trace.current.map(([x,y])=>[(x-ox)/size,(y-oy)/size]));ctx.strokeStyle='#ef6d9e';ctx.lineWidth=18;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash([]);ctx.stroke() }
+    const showPath=level===1 || (level===3 && hintAge>=15)
+    if (showPath&&level!==1) { data.strokes.forEach((s,i)=>{path(s.points);ctx.strokeStyle=i<strokeIndex?'#56baa7':i===strokeIndex?'rgba(108,86,223,.55)':'rgba(108,86,223,.18)';ctx.lineWidth=10;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([]) }
+    completedTraces.current.forEach(points=>{if(points.length>1){path(points,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=18;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()}})
+    if (trace.current.length>1) { path(trace.current,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=18;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash([]);ctx.stroke() }
+    if (!complete&&stroke) { const start=point(stroke.points[0]), end=point(stroke.points.at(-1)!)
+      if ((level===1&&traceState.current==='WAITING') || (level===3&&hintAge>=5)) { ctx.fillStyle='#6c56df';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4) }
+      if ((level===1&&traceState.current==='TRACING') || (level===3&&hintAge>=15)) { ctx.fillStyle='#30a992';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(end[0],end[1],21,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 9px sans-serif';ctx.textAlign='center';ctx.fillText('END',end[0],end[1]+3) }
+      if(level===1&&traceState.current==='TRACING'){
+        const metrics=polylineMetrics(screenStrokes[strokeIndex]), now=performance.now(), delta=Math.min((now-lastDrawTime.current)/1000,.1), scale=Math.max(.72,size/720)
+        guideProgress.current=Math.min(metrics.total,userProgress.current+65*scale,guideProgress.current+52*scale*delta)
+        const guide=pointAtDistance(screenStrokes[strokeIndex],metrics.lengths,metrics.cumulative,guideProgress.current);ctx.shadowColor='#79e7ba';ctx.shadowBlur=18;ctx.fillStyle='#4ed3a0';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(guide[0],guide[1],13,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0
+      } else if (level===2 || (level===3&&hintAge>=15)) { const guide=point(stroke.points[Math.floor((Date.now()/520)%stroke.points.length)]);ctx.shadowColor='#ffcf55';ctx.shadowBlur=16;ctx.fillStyle='#ffcf55';ctx.beginPath();ctx.arc(guide[0],guide[1],10,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0 }
+    }
     if (finger) { ctx.fillStyle='#ffe05b';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(finger[0],finger[1],11,0,Math.PI*2);ctx.fill();ctx.stroke() }
-  },[cameraOn,data,hintAge,level,strokeIndex])
+    lastDrawTime.current=performance.now()
+  },[cameraOn,complete,data,hintAge,level,strokeIndex])
 
-  const addPoint = useCallback((p: Point) => {
-    if (!data || complete) return; trace.current.push(p)
+  const addPoint = useCallback((p: Point, pointing=true) => {
+    if (!data || complete) return
     const box=canvasRef.current!.getBoundingClientRect(), size=Math.min(box.width,box.height)*.86, ox=(box.width-size)/2, oy=(box.height-size)/2
+    if(level===1){
+      if(!pointing){previousPoint.current=null;return}
+      const scale=Math.max(.72,size/720), activeIndex=strokeIndexRef.current, points=data.strokes[activeIndex].points.map(([x,y])=>[ox+x*size,oy+y*size] as Point)
+      const metrics=polylineMetrics(points), start=points[0], end=points.at(-1)!
+      if(traceState.current==='WAITING'){
+        if(Math.hypot(p[0]-start[0],p[1]-start[1])<=36*scale){traceState.current='TRACING';userProgress.current=0;guideProgress.current=0;previousPoint.current=p;trace.current=[p];lastDrawTime.current=performance.now();setMessage(`Stroke ${activeIndex+1} of ${data.strokes.length}: follow the green guide slowly`)}
+        return
+      }
+      const nearest=nearestProgress(p,points,metrics.lengths,metrics.cumulative,Math.max(0,userProgress.current-20*scale),Math.min(metrics.total,userProgress.current+90*scale))
+      if(nearest.distance<=55*scale){
+        userProgress.current=Math.max(userProgress.current,nearest.progress)
+        if(previousPoint.current) trace.current.push(p)
+        previousPoint.current=p
+        if(userProgress.current>=metrics.total-42*scale&&Math.hypot(p[0]-end[0],p[1]-end[1])<=42*scale){
+          completedTraces.current.push([...trace.current]);trace.current=[];previousPoint.current=null;userProgress.current=0;guideProgress.current=0
+          const next=activeIndex+1
+          if(next===data.strokes.length){strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';setComplete(true);setMessage(`Amazing! You wrote ${symbol}!`);onComplete()} else {strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';setMessage(`Great stroke! Find Go for stroke ${next+1}`);startedAt.current=performance.now()}
+        }
+      } else { previousPoint.current=null }
+      return
+    }
+    trace.current.push(p)
     const target=data.strokes[strokeIndex], end=target.points.at(-1)!, ep:Point=[ox+end[0]*size,oy+end[1]*size]
     if (Math.hypot(p[0]-ep[0],p[1]-ep[1])<42 && trace.current.length>8) { trace.current=[]; if (strokeIndex===data.strokes.length-1) {setComplete(true);setMessage(`Amazing! You wrote ${symbol}!`);onComplete()} else {setStrokeIndex(i=>i+1);setMessage('Great! Find the next purple start dot');startedAt.current=performance.now()} }
-  },[complete,data,onComplete,strokeIndex,symbol])
+  },[complete,data,level,onComplete,strokeIndex,symbol])
 
   const startCamera=async()=>{
     setCameraStarting(true)
@@ -117,8 +193,9 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
       if(cameraOn && landmarker.current && video?.readyState===4 && video.currentTime!==lastVideoTime){
         lastVideoTime=video.currentTime
         try {
-          const result=landmarker.current.detectForVideo(video,performance.now()), tip=result.landmarks[0]?.[8]
-          if(tip && canvasRef.current){const b=canvasRef.current.getBoundingClientRect();finger=[(1-tip.x)*b.width,tip.y*b.height];addPoint(finger)}
+          const result=landmarker.current.detectForVideo(video,performance.now()), hand=result.landmarks[0], tip=hand?.[8]
+          if(tip && canvasRef.current){const b=canvasRef.current.getBoundingClientRect(),raw:Point=[(1-tip.x)*b.width,tip.y*b.height];smoothedPoint.current=smoothedPoint.current?[.25*raw[0]+.75*smoothedPoint.current[0],.25*raw[1]+.75*smoothedPoint.current[1]]:raw;finger=smoothedPoint.current;addPoint(finger,level===1?isPointingHand(hand):true)}
+          else {smoothedPoint.current=null;previousPoint.current=null}
         } catch (error) { console.error('SkyWrite hand tracking frame failed.',error) }
       }
       draw(finger)
@@ -126,11 +203,12 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
     }
     loop()
     return()=>{stopped=true;cancelAnimationFrame(raf.current)}
-  },[addPoint,cameraOn,draw])
+  },[addPoint,cameraOn,draw,level])
   useEffect(()=>()=>{
     (videoRef.current?.srcObject as MediaStream|null)?.getTracks().forEach(track=>track.stop())
     landmarker.current?.close()
   },[])
-  const pointer=(e:React.PointerEvent<HTMLCanvasElement>)=>{if(e.buttons===1||e.pointerType==='touch'){const b=e.currentTarget.getBoundingClientRect();addPoint([e.clientX-b.left,e.clientY-b.top])}}
-  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Level {level}</span><b>{levelInfo[level].title}</b></div><button onClick={reset}><RotateCcw/> Start over</button></header><section className="practice-layout"><aside><p className="eyebrow">YOUR QUEST</p><div className="big-symbol">{symbol}</div><h2>Write the {/[0-9]/.test(symbol)?'number':'letter'} {symbol}</h2><p>{levelInfo[level].detail}</p><div className="step-list">{data?.strokes.map((s,i)=><div className={i<strokeIndex?'done':i===strokeIndex?'active':''} key={s.name}><span>{i<strokeIndex?'✓':i+1}</span><p><b>{s.name}</b><small>{i<strokeIndex?'Complete':i===strokeIndex?'Your turn':'Up next'}</small></p></div>)}</div></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><MousePointer2 size={16}/> Mouse or touch</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef} onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);pointer(e)}} onPointerMove={pointer}/>{complete&&<div className="celebrate"><span>★</span><h2>Brilliant sky writing!</h2><p>You completed {symbol} on Level {level}.</p><button className="primary" onClick={goBack}>Collect your stars <Star size={18}/></button></div>}</div><div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn||cameraStarting}><Camera/>{cameraOn?'Camera is on':cameraStarting?'Starting camera…':'Turn on air writing'}</button><p><LockKeyhole size={15}/> Your camera stays on this device.</p></div></div></section></main>
+  const pointer=(e:React.PointerEvent<HTMLCanvasElement>)=>{if(e.buttons===1||e.pointerType==='touch'){const b=e.currentTarget.getBoundingClientRect();addPoint([e.clientX-b.left,e.clientY-b.top],true)}}
+  const endPointer=()=>{previousPoint.current=null}
+  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Level {level}</span><b>{levelInfo[level].title}</b></div><button onClick={reset}><RotateCcw/> Start over</button></header><section className="practice-layout"><aside><p className="eyebrow">YOUR QUEST</p><div className="big-symbol">{symbol}</div><h2>Write the {/[0-9]/.test(symbol)?'number':'letter'} {symbol}</h2><p>{levelInfo[level].detail}</p><div className="step-list">{data?.strokes.map((s,i)=><div className={i<strokeIndex?'done':i===strokeIndex?'active':''} key={s.name}><span>{i<strokeIndex?'✓':i+1}</span><p><b>{s.name}</b><small>{i<strokeIndex?'Complete':i===strokeIndex?'Your turn':'Up next'}</small></p></div>)}</div></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><MousePointer2 size={16}/> Mouse or touch</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef} onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);pointer(e)}} onPointerMove={pointer} onPointerUp={endPointer} onPointerCancel={endPointer}/>{complete&&<div className="celebrate"><span>★</span><h2>Brilliant sky writing!</h2><p>You completed {symbol} on Level {level}.</p><button className="primary" onClick={goBack}>Collect your stars <Star size={18}/></button></div>}</div><div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn||cameraStarting}><Camera/>{cameraOn?'Camera is on':cameraStarting?'Starting camera…':'Turn on air writing'}</button><p><LockKeyhole size={15}/> Your camera stays on this device.</p></div></div></section></main>
 }

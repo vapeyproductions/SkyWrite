@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { ArrowLeft, Camera, ChevronRight, Hand, LockKeyhole, MousePointer2, RotateCcw, Sparkles, Star, Trophy } from 'lucide-react'
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision'
 import type { Level, Point, StrokeData } from './types'
@@ -47,6 +47,20 @@ function isPointingHand(hand: Array<{x:number;y:number}>) {
   return ([[10,12],[14,16],[18,20]] as const).every(([pip,tip])=>!inside(pip)||!inside(tip)||hand[tip].y>hand[pip].y)
 }
 
+function StrokePreview({ points }: { points: Point[] }) {
+  const markerId=useId().replace(/:/g,'')
+  const xs=points.map(point=>point[0]),ys=points.map(point=>point[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys)
+  const width=Math.max(maxX-minX,.001),height=Math.max(maxY-minY,.001),scale=Math.min(76/width,42/height)
+  const offsetX=8+(76-width*scale)/2-minX*scale,offsetY=8+(42-height*scale)/2-minY*scale
+  const preview=points.map(([x,y])=>[x*scale+offsetX,y*scale+offsetY] as Point)
+  const path=preview.map(([x,y],index)=>`${index?'L':'M'} ${x.toFixed(2)} ${y.toFixed(2)}`).join(' ')
+  return <svg className="stroke-preview" viewBox="0 0 92 58" aria-hidden="true">
+    <defs><marker id={markerId} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 8 4 L 0 8 z"/></marker></defs>
+    <path className="stroke-preview-path" d={path} markerEnd={`url(#${markerId})`}/>
+    <circle className="stroke-preview-start" cx={preview[0][0]} cy={preview[0][1]} r="4"/>
+  </svg>
+}
+
 export function App() {
   const [route, setRoute] = useState<'dashboard' | 'practice'>('dashboard')
   const [level, setLevel] = useState<Level>(1)
@@ -79,7 +93,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
   const landmarker = useRef<HandLandmarker | null>(null), raf = useRef(0), trace = useRef<Point[]>([])
   const completedTraces = useRef<Point[][]>([]), traceState = useRef<'WAITING'|'TRACING'|'TRANSITION'>('WAITING')
   const userProgress = useRef(0), guideProgress = useRef(0), previousPoint = useRef<Point|null>(null)
-  const smoothedPoint = useRef<Point|null>(null), strokeIndexRef = useRef(0), lastDrawTime = useRef(performance.now())
+  const smoothedPoint = useRef<Point|null>(null), strokeIndexRef = useRef(0)
   const shadeCanvas = useRef<HTMLCanvasElement|null>(null), transitionTimer = useRef<number|null>(null)
   const lastProgressAt = useRef(performance.now()), lastMeaningfulProgress = useRef(0)
   const goHintShown = useRef(false), advancedHintShown = useRef(false)
@@ -90,7 +104,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
   const startedAt = useRef(performance.now())
   useEffect(() => { fetch(`/strokes_jsons/${symbol}_dotted.strokes.json`).then(r => r.json()).then(value=>{if(transitionTimer.current!==null)window.clearTimeout(transitionTimer.current);transitionTimer.current=null;setData(value);trace.current=[];completedTraces.current=[];traceState.current='WAITING';userProgress.current=0;guideProgress.current=0;previousPoint.current=null;strokeIndexRef.current=0;lastMeaningfulProgress.current=0;goHintShown.current=false;advancedHintShown.current=false;startedAt.current=performance.now();lastProgressAt.current=startedAt.current;setHintAge(0);setStrokeIndex(0);setTransitioning(false)}) }, [symbol])
   useEffect(() => { const id = window.setInterval(() => setHintAge((performance.now() - startedAt.current) / 1000), 250); return () => clearInterval(id) }, [strokeIndex])
-  const reset = useCallback(() => { if(transitionTimer.current!==null)window.clearTimeout(transitionTimer.current);transitionTimer.current=null;trace.current=[];completedTraces.current=[];traceState.current='WAITING';userProgress.current=0;guideProgress.current=0;previousPoint.current=null;smoothedPoint.current=null;strokeIndexRef.current=0;lastMeaningfulProgress.current=0;goHintShown.current=false;advancedHintShown.current=false;setHintAge(0);setStrokeIndex(0);setComplete(false);setTransitioning(false);setMessage(level===3?'Find the first stroke and begin when you are ready':'Place your finger on the purple Go spot');startedAt.current=performance.now();lastProgressAt.current=startedAt.current;lastDrawTime.current=performance.now() }, [level])
+  const reset = useCallback(() => { if(transitionTimer.current!==null)window.clearTimeout(transitionTimer.current);transitionTimer.current=null;trace.current=[];completedTraces.current=[];traceState.current='WAITING';userProgress.current=0;guideProgress.current=0;previousPoint.current=null;smoothedPoint.current=null;strokeIndexRef.current=0;lastMeaningfulProgress.current=0;goHintShown.current=false;advancedHintShown.current=false;setHintAge(0);setStrokeIndex(0);setComplete(false);setTransitioning(false);setMessage(level===3?'Find the first stroke and begin when you are ready':'Place your finger on the purple Go spot');startedAt.current=performance.now();lastProgressAt.current=startedAt.current }, [level])
 
   const draw = useCallback((finger?: Point) => {
     const canvas=canvasRef.current, video=videoRef.current; if (!canvas || !data) return
@@ -115,20 +129,19 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
     completedTraces.current.forEach(points=>{if(points.length>1){path(points,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()}})
     if (trace.current.length>1) { path(trace.current,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash([]);ctx.stroke() }
     if (!complete&&stroke) { const start=point(stroke.points[0]), end=point(stroke.points.at(-1)!), now=performance.now()
-      if(level===3&&traceState.current==='WAITING'&&hintAge>=7&&!goHintShown.current){goHintShown.current=true;setMessage('Hint: begin at the green Go spot')}
-      if(level===3&&!advancedHintShown.current&&((traceState.current==='WAITING'&&hintAge>=12)||(traceState.current==='TRACING'&&now-lastProgressAt.current>=5000))){advancedHintShown.current=true;setMessage('Need help? Follow the green guide to END')}
+      if(level===3&&traceState.current==='WAITING'&&hintAge>=10&&!goHintShown.current){goHintShown.current=true;setMessage('Hint: begin at the green Go spot')}
+      if(level===3&&!advancedHintShown.current&&((traceState.current==='WAITING'&&hintAge>=20)||(traceState.current==='TRACING'&&now-lastProgressAt.current>=10000))){advancedHintShown.current=true;setMessage('Need help? Follow the green guide to END')}
       const showStart=(level<=2&&traceState.current==='WAITING')||(level===3&&traceState.current==='WAITING'&&goHintShown.current)
       const showAdvanced=level===3&&advancedHintShown.current&&traceState.current!=='TRANSITION'
       if (showStart) { ctx.fillStyle=level===3?'#30a992':'#6c56df';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4) }
       if ((level<=2&&traceState.current==='TRACING') || showAdvanced) { ctx.fillStyle='#30a992';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(end[0],end[1],21,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 9px sans-serif';ctx.textAlign='center';ctx.fillText('END',end[0],end[1]+3) }
       if((level<=2&&traceState.current==='TRACING')||showAdvanced){
-        const activePoints=screenStrokes[strokeIndex],metrics=polylineMetrics(activePoints),now=performance.now(),delta=Math.min((now-lastDrawTime.current)/1000,.1),scale=Math.max(.72,size/720),first=activePoints[0],last=activePoints.at(-1)!,mostlyVertical=Math.abs(last[1]-first[1])>Math.abs(last[0]-first[0]),movingUp=mostlyVertical&&last[1]<first[1],movingDown=mostlyVertical&&last[1]>first[1],lead=(movingUp?44:movingDown?36:46)*scale,speed=(movingUp?46:movingDown?34:42)*(level===2?1.15:1)*scale
-        guideProgress.current=Math.min(metrics.total,userProgress.current+lead,guideProgress.current+speed*delta)
+        const activePoints=screenStrokes[strokeIndex],metrics=polylineMetrics(activePoints),scale=Math.max(.72,size/720),first=activePoints[0],last=activePoints.at(-1)!,mostlyVertical=Math.abs(last[1]-first[1])>Math.abs(last[0]-first[0]),movingUp=mostlyVertical&&last[1]<first[1],movingDown=mostlyVertical&&last[1]>first[1],lead=(movingUp?44:movingDown?36:46)*(level===2?1.12:1)*scale
+        guideProgress.current=Math.min(metrics.total,userProgress.current+lead)
         const guide=pointAtDistance(screenStrokes[strokeIndex],metrics.lengths,metrics.cumulative,guideProgress.current);ctx.shadowColor='#79e7ba';ctx.shadowBlur=18;ctx.fillStyle='#4ed3a0';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(guide[0],guide[1],13,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0
       }
     }
     if (finger) { ctx.fillStyle='#ffe05b';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(finger[0],finger[1],11,0,Math.PI*2);ctx.fill();ctx.stroke() }
-    lastDrawTime.current=performance.now()
   },[cameraOn,complete,data,hintAge,level,strokeIndex])
 
   const addPoint = useCallback((p: Point, pointing=true) => {
@@ -139,7 +152,7 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
     const scale=Math.max(.72,size/720), activeIndex=strokeIndexRef.current, points=data.strokes[activeIndex].points.map(([x,y])=>[ox+x*size,oy+y*size] as Point)
     const metrics=polylineMetrics(points), start=points[0], end=points.at(-1)!
     if(traceState.current==='WAITING'){
-      if(Math.hypot(p[0]-start[0],p[1]-start[1])<=36*scale){traceState.current='TRACING';userProgress.current=0;guideProgress.current=0;lastMeaningfulProgress.current=0;lastProgressAt.current=performance.now();previousPoint.current=p;trace.current=[p];lastDrawTime.current=performance.now();setMessage(level===3?`Stroke ${activeIndex+1} of ${data.strokes.length}: write it from memory`:`Stroke ${activeIndex+1} of ${data.strokes.length}: follow the green guide slowly`)}
+      if(Math.hypot(p[0]-start[0],p[1]-start[1])<=36*scale){traceState.current='TRACING';userProgress.current=0;guideProgress.current=0;lastMeaningfulProgress.current=0;lastProgressAt.current=performance.now();previousPoint.current=p;trace.current=[p];setMessage(level===3?`Stroke ${activeIndex+1} of ${data.strokes.length}: write it from memory`:`Stroke ${activeIndex+1} of ${data.strokes.length}: follow the green guide slowly`)}
       return
     }
     const nearest=nearestProgress(p,points,metrics.lengths,metrics.cumulative,Math.max(0,userProgress.current-20*scale),Math.min(metrics.total,userProgress.current+90*scale))
@@ -217,5 +230,5 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
   },[])
   const pointer=(e:React.PointerEvent<HTMLCanvasElement>)=>{if(e.buttons===1||e.pointerType==='touch'){const b=e.currentTarget.getBoundingClientRect();addPoint([e.clientX-b.left,e.clientY-b.top],true)}}
   const endPointer=()=>{previousPoint.current=null}
-  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Level {level}</span><b>{levelInfo[level].title}</b></div><button onClick={reset}><RotateCcw/> Start over</button></header><section className="practice-layout"><aside><p className="eyebrow">YOUR QUEST</p><div className="big-symbol">{symbol}</div><h2>Write the {/[0-9]/.test(symbol)?'number':'letter'} {symbol}</h2><p>{levelInfo[level].detail}</p><div className="step-list">{data?.strokes.map((s,i)=>{const done=i<strokeIndex||(transitioning&&i===strokeIndex);return <div className={done?'done':i===strokeIndex?'active':''} key={s.name}><span>{done?'✓':i+1}</span><p><b>{s.name}</b><small>{done?'Complete':i===strokeIndex?'Your turn':'Up next'}</small></p></div>})}</div></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><MousePointer2 size={16}/> Mouse or touch</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef} onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);pointer(e)}} onPointerMove={pointer} onPointerUp={endPointer} onPointerCancel={endPointer}/></div>{complete&&<div className="celebrate"><span>★</span><div><h2>Brilliant sky writing!</h2><p>Take a look at the {symbol} your strokes created.</p></div><button className="primary" onClick={goBack}>Collect your stars <Star size={18}/></button></div>}<div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn||cameraStarting}><Camera/>{cameraOn?'Camera is on':cameraStarting?'Starting camera…':'Turn on air writing'}</button><p><LockKeyhole size={15}/> Your camera stays on this device.</p></div></div></section></main>
+  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Level {level}</span><b>{levelInfo[level].title}</b></div><button onClick={reset}><RotateCcw/> Start over</button></header><section className="practice-layout"><aside aria-label={`Stroke order for ${symbol}`}><div className="quest-visuals"><div className="big-symbol">{symbol}</div><div className="finger-cue" role="img" aria-label="Point one finger">☝️</div></div><div className="step-list">{data?.strokes.map((s,i)=>{const done=i<strokeIndex||(transitioning&&i===strokeIndex);return <div className={`stroke-step ${done?'done':i===strokeIndex?'active':''}`} key={`${s.name}-${i}`}><span>{done?'✓':i+1}</span><StrokePreview points={s.points}/></div>})}</div></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><MousePointer2 size={16}/> Mouse or touch</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef} onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);pointer(e)}} onPointerMove={pointer} onPointerUp={endPointer} onPointerCancel={endPointer}/></div>{complete&&<div className="celebrate"><span>★</span><div><h2>Brilliant sky writing!</h2><p>Take a look at the {symbol} your strokes created.</p></div><button className="primary" onClick={goBack}>Collect your stars <Star size={18}/></button></div>}<div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn||cameraStarting}><Camera/>{cameraOn?'Camera is on':cameraStarting?'Starting camera…':'Turn on air writing'}</button><p><LockKeyhole size={15}/> Your camera stays on this device.</p></div></div></section></main>
 }

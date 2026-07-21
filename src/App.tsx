@@ -3,19 +3,19 @@ import type { FormEvent } from 'react'
 import { ArrowLeft, Camera, Check, ChevronRight, Crown, Hand, LockKeyhole, MousePointer2, RotateCcw, Sparkles, Star, Trophy, UserRound, X } from 'lucide-react'
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision'
 import type { Level, Point, StrokeData } from './types'
-import { chooseNextChallenge, createLearnerProfile, isLearnerProfile, learningSymbols, masteryRules, profileSummary, recordLearningAttempt, skillLabel } from './learning'
+import { chooseNextChallenge, createLearnerProfile, learningSymbols, masteryRules, migrateLearnerProfile, profileSummary, recordLearningAttempt, skillLabel } from './learning'
 import type { AttemptEvaluation, AttemptMetrics, Challenge, LearnerProfile } from './learning'
 import { IntentModel } from './intentModel'
 import { SymbolModel } from './symbolModel'
 import { structuralAssessment, strokePathLength, trimStartupNoise } from './strokeMatching'
 
 const strokeAssetName = (symbol: string) => /[a-z]/.test(symbol) ? `lower_${symbol}` : symbol
-type PracticeLevel = Level | 4
+type PracticeLevel = Level
 const levelInfo = {
   1: { title: 'Follow the trail', detail: 'A safe path, start points, and a friendly guide', color: '#6c56df' },
   2: { title: 'Follow the guide', detail: 'Keep up with the glowing guide dot', color: '#e56f9e' },
   3: { title: 'Sky writer', detail: 'Write from memory—hints appear if you need them', color: '#30a992' },
-  4: { title: 'Free write', detail: 'No tracing—AI filters and smooths your air writing', color: '#ee8a3a' },
+  4: { title: 'Free write', detail: 'Write independently—help appears only after 30 seconds', color: '#ee8a3a' },
 } satisfies Record<PracticeLevel, { title: string; detail: string; color: string }>
 type SessionMode = 'learning' | 'practice'
 type CompletionFeedback = {
@@ -30,7 +30,9 @@ const PROFILE_KEY = 'skywrite-learner-profile-v1'
 const readProfile = () => {
   try {
     const saved = JSON.parse(localStorage.getItem(PROFILE_KEY) || 'null')
-    return isLearnerProfile(saved) ? saved : null
+    const migrated = migrateLearnerProfile(saved)
+    if (migrated && saved?.version !== migrated.version) localStorage.setItem(PROFILE_KEY, JSON.stringify(migrated))
+    return migrated
   } catch { return null }
 }
 const saveProfile = (profile: LearnerProfile) => {
@@ -124,13 +126,15 @@ function StrokePreview({ points }: { points: Point[] }) {
   const preview=points.map(([x,y])=>[x*scale+offsetX,y*scale+offsetY] as Point)
   const path=preview.map(([x,y],index)=>`${index?'L':'M'} ${x.toFixed(2)} ${y.toFixed(2)}`).join(' ')
   const metrics=polylineMetrics(preview)
-  const arrowFractions=metrics.total>130?[.18,.38,.58,.78,1]:metrics.total>72?[.22,.48,.74,1]:metrics.total>30?[.32,.66,1]:[1]
+  const arrowCandidates=metrics.total>80?[.33,.66,1]:metrics.total>38?[.5,1]:[1]
+  const candidatePositions=arrowCandidates.map(fraction=>pointAtDistance(preview,metrics.lengths,metrics.cumulative,metrics.total*fraction))
+  const arrowFractions=arrowCandidates.filter((_,index)=>index===arrowCandidates.length-1||candidatePositions.slice(index+1).every(position=>Math.hypot(candidatePositions[index][0]-position[0],candidatePositions[index][1]-position[1])>=18))
   const arrows=arrowFractions.map((fraction,index)=>{
     const distance=metrics.total*fraction,position=pointAtDistance(preview,metrics.lengths,metrics.cumulative,distance)
     const before=pointAtDistance(preview,metrics.lengths,metrics.cumulative,Math.max(0,distance-7))
     const after=pointAtDistance(preview,metrics.lengths,metrics.cumulative,Math.min(metrics.total,distance+7))
     const angle=Math.atan2(after[1]-before[1],after[0]-before[0])*180/Math.PI
-    return <path className="stroke-preview-arrow" d="M 4 0 L -12 -7.5 L -8.5 0 L -12 7.5 Z" transform={`translate(${position[0].toFixed(2)} ${position[1].toFixed(2)}) rotate(${angle.toFixed(2)})`} key={`${fraction}-${index}`}/>
+    return <path className="stroke-preview-arrow" d="M 3 0 L -8 -4.5 L -6 0 L -8 4.5 Z" transform={`translate(${position[0].toFixed(2)} ${position[1].toFixed(2)}) rotate(${angle.toFixed(2)})`} key={`${fraction}-${index}`}/>
   })
   return <svg className="stroke-preview" viewBox="0 0 112 64" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
     <path className="stroke-preview-path" d={path}/>
@@ -142,9 +146,10 @@ function StrokePreview({ points }: { points: Point[] }) {
 export function App() {
   const [route, setRoute] = useState<'dashboard' | 'practice'>('dashboard')
   const [sessionMode, setSessionMode] = useState<SessionMode>('learning')
-  const [challenge, setChallenge] = useState<Challenge | { symbol: string; level: 4 }>({ symbol: 'A', level: 1 })
+  const [challenge, setChallenge] = useState<Challenge>({ symbol: 'A', level: 1 })
   const [challengeId, setChallengeId] = useState(0)
   const [profile, setProfile] = useState<LearnerProfile | null>(readProfile)
+  const profileRef = useRef<LearnerProfile | null>(profile)
   const [profileOpen, setProfileOpen] = useState(false)
   const [startAfterProfile, setStartAfterProfile] = useState(false)
   const [draftName, setDraftName] = useState(profile?.name ?? '')
@@ -179,15 +184,18 @@ export function App() {
     if (!draftName.trim()) return
     const learner = profile ? { ...profile, name: draftName.trim(), updatedAt: Date.now() } : createLearnerProfile(draftName)
     saveProfile(learner)
+    profileRef.current = learner
     setProfile(learner)
     setProfileOpen(false)
     if (startAfterProfile) launchLearning(learner)
     setStartAfterProfile(false)
   }
   const completeAttempt = useCallback((metrics: AttemptMetrics): CompletionFeedback => {
-    if (sessionMode === 'learning' && profile) {
-      const recorded = recordLearningAttempt(profile, metrics)
+    const learner = profileRef.current
+    if (sessionMode === 'learning' && learner) {
+      const recorded = recordLearningAttempt(learner, metrics)
       saveProfile(recorded.profile)
+      profileRef.current = recorded.profile
       setProfile(recorded.profile)
       const next = chooseNextChallenge(recorded.profile)
       const evaluation = recorded.evaluation
@@ -200,9 +208,11 @@ export function App() {
             ? `Strong sky writing!`
             : `Good practice—keep growing!`
       const detail = evaluation.masteredNow
-        ? `All five memory-writing checks are complete.`
+        ? `All three independent free-writing checks are complete.`
         : evaluation.promotedTo
-          ? `The next ${metrics.symbol} challenge will use less guidance.`
+          ? evaluation.promotedTo === 4
+            ? `The next ${metrics.symbol} challenge will be free writing with no help.`
+            : `The next ${metrics.symbol} challenge will use less guidance.`
           : evaluation.strong
             ? `${skill.strongStreak} of ${masteryRules[skill.level].required} strong tries at Level ${skill.level}.`
             : `SkyWrite will bring ${metrics.symbol} back soon for another try.`
@@ -214,7 +224,7 @@ export function App() {
       detail: 'Free practice does not change the learner mastery path.',
       next: { symbol: randomPracticeSymbol(metrics.symbol), level: metrics.level },
     }
-  }, [profile, sessionMode])
+  }, [sessionMode])
   const nextChallenge = (next: Challenge) => {
     setChallenge(next)
     setChallengeId(value => value + 1)
@@ -224,7 +234,7 @@ export function App() {
   return route === 'dashboard'
     ? <><Dashboard profile={profile} next={dashboardNext} onStartLearning={requestLearning} onPractice={startPractice} onOpenProfile={openProfile}/><ProfileDialog open={profileOpen} profile={profile} name={draftName} setName={setDraftName} startAfterCreate={startAfterProfile} onSubmit={submitProfile} onClose={() => { setProfileOpen(false); setStartAfterProfile(false) }}/></>
     : challenge.level === 4
-      ? <FreeWritePractice symbol={challenge.symbol} challengeId={challengeId} goBack={() => setRoute('dashboard')} onNext={() => { setChallenge({ symbol: randomPracticeSymbol(challenge.symbol), level: 4 }); setChallengeId(value => value + 1) }} />
+      ? <FreeWritePractice symbol={challenge.symbol} challengeId={challengeId} sessionMode={sessionMode} masteredCount={profileSummary(profile).mastered} goBack={() => setRoute('dashboard')} onComplete={completeAttempt} onNext={nextChallenge} />
       : <Practice challengeId={challengeId} level={challenge.level} symbol={challenge.symbol} sessionMode={sessionMode} masteredCount={profileSummary(profile).mastered} goBack={() => setRoute('dashboard')} onComplete={completeAttempt} onNext={nextChallenge} />
 }
 
@@ -237,11 +247,11 @@ function Dashboard({ profile, next, onStartLearning, onPractice, onOpenProfile }
     <section className="stats"><div><span className="stat-icon purple"><Trophy/></span><p><b>{summary.mastered} / 62</b><small>Characters mastered</small></p></div><div><span className="stat-icon pink"><Star/></span><p><b>{summary.percent}%</b><small>Mastery journey</small></p></div><div><span className="stat-icon green">Aa</span><p><b>{summary.introduced}</b><small>Characters introduced</small></p></div></section>
     <section className="content">
       <div className="section-head"><div><p className="eyebrow">HOW LEARNING GROWS</p><h2>A small, smart rotation</h2></div><span className="tiny-note">Progress saves after every letter</span></div>
-      <div className="mastery-roadmap">{([1,2,3] as Level[]).map(level => <div className="roadmap-step" key={level} style={{'--accent': levelInfo[level].color} as React.CSSProperties}><span>{level}</span><div><b>{levelInfo[level].title}</b><small>{level === 1 ? 'Under 30 sec · 80% in the path · 3 times' : level === 2 ? 'Under 30 sec · 80% dot coverage · 3 times' : 'Under 30 sec · no hints · 5 times'}</small></div></div>)}</div>
+      <div className="mastery-roadmap">{([1,2,3,4] as Level[]).map(level => <div className="roadmap-step" key={level} style={{'--accent': levelInfo[level].color} as React.CSSProperties}><span>{level}</span><div><b>{levelInfo[level].title}</b><small>{level === 1 ? 'Under 30 sec · 80% in the path · 3 in a row' : level === 2 ? 'Under 30 sec · 80% dot coverage · 3 in a row' : level === 3 ? 'Under 30 sec · no hints · 5 in a row' : 'No tracing reminder · 3 in a row'}</small></div></div>)}</div>
       <div className="section-head practice-heading"><div><p className="eyebrow">JUST FOR PRACTICE</p><h2>Choose one level</h2></div><span className="tiny-note">Random letters · does not change mastery</span></div>
-      <div className="level-grid">{([1,2,3,4] as PracticeLevel[]).map((l, i) => <button className="level-card" style={{'--accent': levelInfo[l].color} as React.CSSProperties} key={l} onClick={() => onPractice(l)}><span className="level-number">{l}</span><div className="level-visual">{i === 0 ? 'A···' : i === 1 ? 'a  ●' : i === 2 ? 'B  ✦' : 'R  ☝'}</div><h3>{levelInfo[l].title}</h3><p>{levelInfo[l].detail}</p><span className="card-link">{l === 4 ? 'Test smart free writing' : 'Practice random letters'}<ChevronRight size={18}/></span></button>)}</div>
+      <div className="level-grid">{([1,2,3,4] as PracticeLevel[]).map((l, i) => <button className="level-card" style={{'--accent': levelInfo[l].color} as React.CSSProperties} key={l} onClick={() => onPractice(l)}><span className="level-number">{l}</span><div className="level-visual">{i === 0 ? 'A···' : i === 1 ? 'a  ●' : i === 2 ? 'B  ✦' : 'R  ☝'}</div><h3>{levelInfo[l].title}</h3><p>{levelInfo[l].detail}</p><span className="card-link">Practice random letters<ChevronRight size={18}/></span></button>)}</div>
       <div className="section-head alphabet-head"><div><p className="eyebrow">THE 62-SKILL JOURNEY</p><h2>Alphabet & number progress</h2></div><span className="progress-legend"><span>★ Level</span><span><Crown size={14}/> Mastered</span></span></div>
-      <div className="symbol-grid progress-grid">{learningSymbols.map(symbol => {const skill=profile?.skills[symbol],shownLevel=skill ? skill.level : 0;return <div className={`symbol-progress ${skill?'introduced':''} ${skill?.mastered?'mastered':''}`} key={symbol} title={skillLabel(skill)} aria-label={`${symbol}: ${skillLabel(skill)}`}><b>{symbol}</b>{skill?.mastered?<Crown size={15}/>:<span className="skill-stars">{[1,2,3].map(star=><span className={star<=shownLevel?'filled':''} key={star}>★</span>)}</span>}</div>})}</div>
+      <div className="symbol-grid progress-grid">{learningSymbols.map(symbol => {const skill=profile?.skills[symbol],shownLevel=skill ? skill.level : 0;return <div className={`symbol-progress ${skill?'introduced':''} ${skill?.mastered?'mastered':''}`} key={symbol} title={skillLabel(skill)} aria-label={`${symbol}: ${skillLabel(skill)}`}><b>{symbol}</b>{skill?.mastered?<Crown size={15}/>:<span className="skill-stars">{[1,2,3,4].map(star=><span className={star<=shownLevel?'filled':''} key={star}>★</span>)}</span>}</div>})}</div>
     </section><footer>Made with wonder for growing writers <span>✦</span></footer>
   </main>
 }
@@ -252,15 +262,18 @@ function ProfileDialog({ open, profile, name, setName, startAfterCreate, onSubmi
   return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="profile-dialog" role="dialog" aria-modal="true" aria-labelledby="profile-title"><button className="dialog-close" onClick={onClose} aria-label="Close profile"><X/></button><span className="dialog-icon"><UserRound/></span><p className="eyebrow">LEARNER PROFILE</p><h2 id="profile-title">{profile ? `${profile.name}'s learning path` : 'Who is learning today?'}</h2><p>{profile ? 'Update the learner name or continue the saved path.' : 'Enter a first name or nickname. No email or password is needed.'}</p>{profile&&<div className="profile-summary"><span><b>{summary.mastered}</b> mastered</span><span><b>{summary.percent}%</b> complete</span></div>}<form onSubmit={onSubmit}><label htmlFor="learner-name">Learner name</label><input id="learner-name" value={name} onChange={event => setName(event.target.value)} maxLength={24} autoFocus placeholder="First name or nickname"/><button className="primary" disabled={!name.trim()}>{profile ? 'Save profile' : startAfterCreate ? 'Create & start learning' : 'Create profile'}<ChevronRight size={18}/></button></form><p className="device-note"><LockKeyhole size={15}/> Progress is private and saved in this browser on this device.</p></section></div>
 }
 
-function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: string; challengeId: number; goBack: () => void; onNext: () => void }) {
+function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, goBack, onComplete, onNext }: { symbol: string; challengeId: number; sessionMode: SessionMode; masteredCount: number; goBack: () => void; onComplete: (metrics: AttemptMetrics) => CompletionFeedback; onNext: (challenge: Challenge) => void }) {
   const videoRef = useRef<HTMLVideoElement>(null), canvasRef = useRef<HTMLCanvasElement>(null)
   const landmarker = useRef<HandLandmarker | null>(null), intentModel = useRef<IntentModel | null>(null), symbolModel = useRef<SymbolModel | null>(null)
   const raf = useRef(0), intentQueue = useRef<Promise<void>>(Promise.resolve())
   const strokes = useRef<Point[][]>([]), activeStroke = useRef<Point[]>([]), smoothedPoint = useRef<Point | null>(null)
   const hasInk = useRef(false), passed = useRef(false), recognitionBusy = useRef(false), lastRecognitionAt = useRef(0), lastMeaningfulAt = useRef(performance.now()), advanceTimer = useRef<number | null>(null)
   const expectedStrokeCount = useRef(1), repositionGuard = useRef<{ active: boolean; samples: Point[] }>({ active: false, samples: [] }), coverageCheckAt = useRef(0)
-  const referenceData = useRef<StrokeData | null>(null)
-  const [cameraOn, setCameraOn] = useState(false), [cameraStarting, setCameraStarting] = useState(false)
+  const referenceData = useRef<StrokeData | null>(null), cameraOnRef = useRef(false), taskStartedAt = useRef<number | null>(null), drawingRevision = useRef(0)
+  const guidanceShownRef = useRef(false), guidanceFailureRecorded = useRef(false), guidedNext = useRef<Challenge | null>(null)
+  const guidanceStrokeIndex = useRef(0), guidanceProgress = useRef(0), guidanceTransitionStartedAt = useRef<number | null>(null)
+  const [cameraOn, setCameraOn] = useState(false), [cameraStarting, setCameraStarting] = useState(false), [guidanceShown, setGuidanceShown] = useState(false)
+  const [reference, setReference] = useState<StrokeData | null>(null)
   const [message, setMessage] = useState('Turn on air writing, then write the character shown at left.')
 
   const finishStroke = useCallback(() => {
@@ -269,31 +282,83 @@ function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: st
     if (prepared.length >= 3 && (strokePathLength(prepared) >= minimum * .02 || isExpectedDot)) strokes.current.push([...prepared])
     activeStroke.current = []
   }, [symbol])
-  const clear = useCallback(() => {
+
+  const clearDrawing = useCallback(() => {
+    drawingRevision.current += 1
     strokes.current = []
     activeStroke.current = []
     smoothedPoint.current = null
     intentModel.current?.reset()
-    repositionGuard.current = { active: false, samples: [] }; coverageCheckAt.current = 0
-    hasInk.current = false; passed.current = false; recognitionBusy.current = false; lastMeaningfulAt.current = performance.now()
+    repositionGuard.current = { active: false, samples: [] }
+    coverageCheckAt.current = 0
+    lastRecognitionAt.current = 0
+    guidanceStrokeIndex.current = 0
+    guidanceProgress.current = 0
+    guidanceTransitionStartedAt.current = null
+    hasInk.current = false
+    passed.current = false
+    recognitionBusy.current = false
+    lastMeaningfulAt.current = performance.now()
     if (advanceTimer.current !== null) { window.clearTimeout(advanceTimer.current); advanceTimer.current = null }
-    setMessage(cameraOn ? `Write ${symbol} freely in the air.` : 'Turn on air writing, then write the character shown at left.')
-  }, [cameraOn, symbol])
+  }, [])
+
+  const attemptMetrics = useCallback((didPass: boolean, hintsUsed: number): AttemptMetrics => ({
+    symbol,
+    level: 4,
+    durationSeconds: taskStartedAt.current === null ? 0 : (performance.now() - taskStartedAt.current) / 1000,
+    pathAccuracy: 0,
+    dotCoverage: 0,
+    hintsUsed,
+    passed: didPass,
+  }), [symbol])
+
+  const recordFailure = useCallback(() => {
+    if (sessionMode !== 'learning') return null
+    return onComplete(attemptMetrics(false, guidanceShownRef.current ? 1 : 0))
+  }, [attemptMetrics, onComplete, sessionMode])
+
+  const resetFailedDrawing = useCallback((reason: string) => {
+    recordFailure()
+    clearDrawing()
+    setMessage(reason)
+  }, [clearDrawing, recordFailure])
+
   useEffect(() => {
-    clear()
-    fetch(`/strokes_jsons/${strokeAssetName(symbol)}_dotted.strokes.json`).then(response => response.json()).then((value: StrokeData) => { referenceData.current = value; expectedStrokeCount.current = Math.max(1, value.strokes.length) }).catch(() => { referenceData.current = null; expectedStrokeCount.current = 1 })
-  }, [challengeId, clear, symbol])
+    let current = true
+    clearDrawing()
+    guidanceShownRef.current = false
+    guidanceFailureRecorded.current = false
+    guidedNext.current = null
+    setGuidanceShown(false)
+    setReference(null)
+    taskStartedAt.current = cameraOnRef.current ? performance.now() : null
+    setMessage(cameraOnRef.current ? `Write ${symbol} freely in the air.` : 'Turn on air writing, then write the character shown at left.')
+    referenceData.current = null
+    fetch(`/strokes_jsons/${strokeAssetName(symbol)}_dotted.strokes.json`).then(response => response.json()).then((value: StrokeData) => {
+      if (!current) return
+      referenceData.current = value
+      setReference(value)
+      expectedStrokeCount.current = Math.max(1, value.strokes.length)
+    }).catch(() => {
+      if (!current) return
+      referenceData.current = null
+      setReference(null)
+      expectedStrokeCount.current = 1
+    })
+    return () => { current = false }
+  }, [challengeId, clearDrawing, symbol])
 
   const assessDrawing = useCallback(async () => {
     const model = symbolModel.current
     if (!model || recognitionBusy.current || passed.current) return
+    const revision = drawingRevision.current
     const rawCandidate = [...strokes.current, ...(activeStroke.current.length >= 2 ? [[...activeStroke.current]] : [])]
     const box = canvasRef.current?.getBoundingClientRect()
     if (!box) return
     const structure = structuralAssessment(rawCandidate, referenceData.current, symbol, Math.min(box.width, box.height)), candidate = structure.cleaned
     const quality = freeWriteStats(candidate, box.width, box.height), minimum = Math.min(box.width, box.height)
     const clearlyVisible = quality.height >= minimum * .16 && Math.max(quality.width, quality.height) >= minimum * .22
-    const uncluttered = quality.coverage < .13 && quality.pathLength < minimum * 6 && quality.strokeCount <= expectedStrokeCount.current + 1
+    const uncluttered = quality.coverage < .09 && quality.pathLength < minimum * 6 && quality.strokeCount <= expectedStrokeCount.current + 1
     if (!clearlyVisible || !uncluttered || !structure.complete || structure.substantialExtra) return
     recognitionBusy.current = true
     try {
@@ -301,15 +366,28 @@ function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: st
       const acceptedZero = symbol === '0' && structure.score >= .38 && looksLikeZero(candidate, box.width, box.height)
       const strongTemplateOverride = (symbol === 'I' || symbol.toLowerCase() === 'c') && structure.score >= .68
       const matchedWholeCharacter = (assessment.matched && structure.score >= .44) || acceptedZero || strongTemplateOverride
-      if (matchedWholeCharacter && !passed.current) {
+      if (matchedWholeCharacter && !passed.current && revision === drawingRevision.current) {
         passed.current = true
         finishStroke()
-        setMessage(`Yes—that looks like ${symbol}! Moving to the next character…`)
-        advanceTimer.current = window.setTimeout(onNext, 650)
+        const usedGuidance = guidanceShownRef.current
+        let feedback: CompletionFeedback | null = null
+        let next = guidedNext.current
+        if (!(sessionMode === 'learning' && usedGuidance && guidanceFailureRecorded.current)) {
+          feedback = onComplete(attemptMetrics(true, usedGuidance ? 1 : 0))
+          next = feedback.next
+        }
+        if (!next) {
+          feedback = onComplete(attemptMetrics(true, usedGuidance ? 1 : 0))
+          next = feedback.next
+        }
+        setMessage(usedGuidance
+          ? `Yes—that looks like ${symbol}! The reminder helped; this try will not count toward mastery.`
+          : `Yes—that looks like ${symbol}! ${feedback?.headline ?? 'Moving to the next character…'}`)
+        advanceTimer.current = window.setTimeout(() => onNext(next!), 900)
       }
     } catch (error) { console.error('SkyWrite symbol assessment failed.', error) }
     finally { recognitionBusy.current = false }
-  }, [finishStroke, onNext, symbol])
+  }, [attemptMetrics, finishStroke, onComplete, onNext, sessionMode, symbol])
 
   const acceptIntentPoint = useCallback((point: Point, drawing: boolean) => {
     if (!drawing) { finishStroke(); return }
@@ -344,19 +422,21 @@ function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: st
     }
     if (!previous || Math.hypot(point[0] - previous[0], point[1] - previous[1]) >= 1.5) {
       activeStroke.current.push(point)
-      hasInk.current = true; lastMeaningfulAt.current = performance.now()
+      hasInk.current = true
+      lastMeaningfulAt.current = performance.now()
       if (box && performance.now() - coverageCheckAt.current >= 250) {
         coverageCheckAt.current = performance.now()
         const candidate = [...strokes.current, [...activeStroke.current]], quality = freeWriteStats(candidate, box.width, box.height)
-        if (quality.coverage >= .13 || quality.pathLength >= minimum * 6) {
-          clear(); setMessage(`That drawing covered too much of the board. Let's try ${symbol} again.`); return
+        if (quality.coverage >= .09 || quality.pathLength >= minimum * 6) {
+          resetFailedDrawing(`That drawing covered too much of the board. Let's try ${symbol} again.`)
+          return
         }
       }
       if (performance.now() - lastRecognitionAt.current >= 450) {
         lastRecognitionAt.current = performance.now(); void assessDrawing()
       }
     }
-  }, [assessDrawing, clear, finishStroke, symbol])
+  }, [assessDrawing, finishStroke, resetFailedDrawing, symbol])
 
   const draw = useCallback((finger?: Point) => {
     const canvas = canvasRef.current, video = videoRef.current
@@ -379,6 +459,16 @@ function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: st
       gradient.addColorStop(0, '#f6f2ff'); gradient.addColorStop(1, '#e8fbf6')
       ctx.fillStyle = gradient; ctx.fillRect(0, 0, w, h)
     }
+    if (guidanceShownRef.current && referenceData.current) {
+      const size = Math.min(w, h) * .86, ox = (w - size) / 2, oy = (h - size) / 2
+      ctx.strokeStyle = 'rgba(108,86,223,.68)'; ctx.lineWidth = 10; ctx.setLineDash([2, 18]); ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+      referenceData.current.strokes.forEach(stroke => {
+        ctx.beginPath()
+        stroke.points.forEach(([x, y], index) => index ? ctx.lineTo(ox + x * size, oy + y * size) : ctx.moveTo(ox + x * size, oy + y * size))
+        ctx.stroke()
+      })
+      ctx.setLineDash([])
+    }
     const renderStroke = (points: Point[]) => {
       if (points.length < 2) return
       ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1])
@@ -390,6 +480,34 @@ function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: st
       ctx.strokeStyle = '#ef6d9e'; ctx.lineWidth = 24; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.stroke()
     }
     strokes.current.forEach(renderStroke); renderStroke(trimStartupNoise(activeStroke.current, symbol, Math.min(w, h)))
+    if (guidanceShownRef.current && referenceData.current?.strokes.length) {
+      const size = Math.min(w, h) * .86, ox = (w - size) / 2, oy = (h - size) / 2
+      const screenStrokes = referenceData.current.strokes.map(stroke => stroke.points.map(([x, y]) => [ox + x * size, oy + y * size] as Point))
+      const now = performance.now()
+      if (guidanceTransitionStartedAt.current !== null && now - guidanceTransitionStartedAt.current >= 1000 && guidanceStrokeIndex.current < screenStrokes.length - 1) {
+        guidanceStrokeIndex.current += 1
+        guidanceProgress.current = 0
+        guidanceTransitionStartedAt.current = null
+      }
+      const active = screenStrokes[Math.min(guidanceStrokeIndex.current, screenStrokes.length - 1)], metrics = polylineMetrics(active)
+      const start = active[0], end = active.at(-1)!, scale = Math.max(.72, size / 720)
+      if (finger && guidanceTransitionStartedAt.current === null) {
+        const nearest = nearestProgress(finger, active, metrics.lengths, metrics.cumulative, Math.max(0, guidanceProgress.current - 20 * scale), Math.min(metrics.total, guidanceProgress.current + 90 * scale))
+        if (nearest.distance <= 55 * scale) guidanceProgress.current = Math.max(guidanceProgress.current, nearest.progress)
+        if (guidanceProgress.current >= metrics.total - 12 * scale && Math.hypot(finger[0] - end[0], finger[1] - end[1]) <= 18 * scale) guidanceTransitionStartedAt.current = now
+      }
+      const first = active[0], last = active.at(-1)!, mostlyVertical = Math.abs(last[1] - first[1]) > Math.abs(last[0] - first[0])
+      const movingUp = mostlyVertical && last[1] < first[1], movingDown = mostlyVertical && last[1] > first[1]
+      const lead = (movingUp ? 44 : movingDown ? 36 : 46) * scale
+      const guide = pointAtDistance(active, metrics.lengths, metrics.cumulative, Math.min(metrics.total, guidanceProgress.current + lead))
+      const circle = (position: Point, radius: number, label = '') => {
+        ctx.fillStyle = '#30a992'; ctx.strokeStyle = 'white'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(position[0], position[1], radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
+        if (label) { ctx.fillStyle = 'white'; ctx.font = '800 9px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(label, position[0], position[1] + 3) }
+      }
+      if (guidanceProgress.current < metrics.total * .04) circle(start, 20, 'GO')
+      circle(end, 21, 'END')
+      ctx.save(); ctx.shadowColor = '#79e7ba'; ctx.shadowBlur = 18; circle(guide, 13); ctx.restore()
+    }
     if (finger) {
       ctx.fillStyle = '#ffe05b'; ctx.strokeStyle = 'white'; ctx.lineWidth = 4
       ctx.beginPath(); ctx.arc(finger[0], finger[1], 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
@@ -411,7 +529,10 @@ function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: st
       catch { landmarker.current = await HandLandmarker.createFromOptions(files, options('CPU')) }
       startupStage = 'smart drawing model'
       ;[intentModel.current, symbolModel.current] = await Promise.all([IntentModel.load(), SymbolModel.load()])
-      setCameraOn(true); setMessage(`Write ${symbol} freely in the air. Your cleaned strokes appear after a short delay.`)
+      cameraOnRef.current = true
+      taskStartedAt.current = performance.now()
+      setCameraOn(true)
+      setMessage(`Write ${symbol} freely in the air. Your cleaned strokes appear after a short delay.`)
     } catch (error) {
       console.error('SkyWrite free-write startup failed.', error)
       stream?.getTracks().forEach(track => track.stop())
@@ -420,6 +541,12 @@ function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: st
       const detail = error instanceof Error ? error.message : String(error)
       setMessage(`Free Write ${startupStage} could not start: ${detail}`)
     } finally { setCameraStarting(false) }
+  }
+
+  const manuallyClear = () => {
+    if (hasInk.current && !passed.current) recordFailure()
+    clearDrawing()
+    setMessage(cameraOnRef.current ? `The board is clear. Try ${symbol} again.` : 'Turn on air writing, then write the character shown at left.')
   }
 
   useEffect(() => {
@@ -452,21 +579,38 @@ function FreeWritePractice({ symbol, challengeId, goBack, onNext }: { symbol: st
     loop()
     return () => { stopped = true; cancelAnimationFrame(raf.current) }
   }, [acceptIntentPoint, cameraOn, draw, finishStroke])
+
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (hasInk.current && !passed.current && performance.now() - lastMeaningfulAt.current >= 15000) {
-        clear(); setMessage(`Let's try ${symbol} again—the board was cleared after a 15-second pause.`)
+      const now = performance.now()
+      if (!passed.current && cameraOnRef.current && taskStartedAt.current !== null && !guidanceShownRef.current && now - taskStartedAt.current >= 30000) {
+        guidanceShownRef.current = true
+        guidanceStrokeIndex.current = 0
+        guidanceProgress.current = 0
+        guidanceTransitionStartedAt.current = null
+        setGuidanceShown(true)
+        if (sessionMode === 'learning' && !guidanceFailureRecorded.current) {
+          const feedback = recordFailure()
+          guidanceFailureRecorded.current = true
+          guidedNext.current = feedback?.next ?? null
+        }
+        setMessage(`Here's a reminder—follow the dotted ${symbol} and the stroke arrows.`)
+      }
+      if (hasInk.current && !passed.current && now - lastMeaningfulAt.current >= 15000) {
+        resetFailedDrawing(`Let's try ${symbol} again—the board was cleared after a 15-second pause.`)
       }
     }, 500)
     return () => window.clearInterval(timer)
-  }, [clear, symbol])
+  }, [recordFailure, resetFailedDrawing, sessionMode, symbol])
+
   useEffect(() => () => {
-    (videoRef.current?.srcObject as MediaStream | null)?.getTracks().forEach(track => track.stop())
+    cameraOnRef.current = false
+    ;(videoRef.current?.srcObject as MediaStream | null)?.getTracks().forEach(track => track.stop())
     landmarker.current?.close(); void intentModel.current?.release(); void symbolModel.current?.release()
     if (advanceTimer.current !== null) window.clearTimeout(advanceTimer.current)
   }, [])
 
-  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> Dashboard</button><div className="practice-title"><span>Model test · Level 4</span><b>{symbol} · Free write</b></div><button onClick={clear}><RotateCcw/> Clear drawing</button></header><section className="practice-layout freewrite-layout"><aside aria-label={`Character to free-write: ${symbol}`}><div className="session-badge"><Sparkles size={15}/>Smart stroke test</div><p className="freewrite-label">WRITE THIS CHARACTER</p><div className="freewrite-target">{symbol}</div><p className="freewrite-copy">No path or hints. Lift one finger and write naturally in the camera area.</p><button className="primary freewrite-next" onClick={onNext}>Try another<ChevronRight size={18}/></button></aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><Sparkles size={16}/> Delayed intent smoothing</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef}/></div><div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn || cameraStarting}><Camera/>{cameraOn ? 'Camera is on' : cameraStarting ? 'Starting Free Write…' : 'Turn on Free Write'}</button><p><LockKeyhole size={15}/> The model and camera stay on this device.</p></div></div></section></main>
+  return <main className="practice-shell"><header className="practice-nav"><button onClick={goBack}><ArrowLeft/> {sessionMode === 'learning' ? 'End session' : 'Dashboard'}</button><div className="practice-title"><span>{sessionMode === 'learning' ? 'Learning path' : 'Free practice'} · Level 4</span><b>{symbol} · Free write</b></div><button onClick={manuallyClear}><RotateCcw/> Clear drawing</button></header><section className="practice-layout freewrite-layout"><aside aria-label={guidanceShown ? `Stroke reminder for ${symbol}` : `Character to free-write: ${symbol}`}><div className="session-badge">{sessionMode === 'learning' ? <><Trophy size={15}/>{masteredCount}/62 mastered</> : <><Star size={15}/>Practice only</>}</div>{guidanceShown ? <><div className="quest-visuals"><div className="big-symbol">{symbol}</div><div className="finger-cue" role="img" aria-label="Point one finger">☝️</div></div><div className="step-list">{reference?.strokes.map((stroke, index) => <div className="stroke-step active guidance-step" key={`${stroke.name}-${index}`}><span>{index + 1}</span><StrokePreview points={stroke.points}/></div>)}</div><p className="freewrite-copy">Follow the dotted letter and each arrow to finish this reminder try.</p></> : <><p className="freewrite-label">WRITE THIS CHARACTER</p><div className="freewrite-target">{symbol}</div><p className="freewrite-copy">Write from memory with one raised finger. A tracing reminder appears after 30 seconds.</p></>}{sessionMode === 'practice' && <button className="primary freewrite-next" onClick={() => onNext({ symbol: randomPracticeSymbol(symbol), level: 4 })}>Try another<ChevronRight size={18}/></button>}</aside><div className="studio"><div className="studio-head"><p><span className="pulse"/>{message}</p><div className="mode"><Sparkles size={16}/> Delayed intent smoothing</div></div><div className="camera-stage"><video ref={videoRef} playsInline muted/><canvas ref={canvasRef}/></div><div className="studio-actions"><button className="camera-button" onClick={startCamera} disabled={cameraOn || cameraStarting}><Camera/>{cameraOn ? 'Camera is on' : cameraStarting ? 'Starting Free Write…' : 'Turn on Free Write'}</button><p><LockKeyhole size={15}/> The model and camera stay on this device.</p></div></div></section></main>
 }
 
 function Practice({ level, symbol, challengeId, sessionMode, masteredCount, goBack, onComplete, onNext }: { level: Level; symbol: string; challengeId: number; sessionMode: SessionMode; masteredCount: number; goBack: () => void; onComplete: (metrics: AttemptMetrics) => CompletionFeedback; onNext: (challenge: Challenge) => void }) {
@@ -489,7 +633,11 @@ function Practice({ level, symbol, challengeId, sessionMode, masteredCount, goBa
   const startedAt = useRef(performance.now())
   useEffect(() => { fetch(`/strokes_jsons/${strokeAssetName(symbol)}_dotted.strokes.json`).then(r => r.json()).then(value=>{if(transitionTimer.current!==null)window.clearTimeout(transitionTimer.current);transitionTimer.current=null;setData(value);trace.current=[];completedTraces.current=[];traceState.current='WAITING';userProgress.current=0;guideProgress.current=0;previousPoint.current=null;smoothedPoint.current=null;strokeIndexRef.current=0;lastMeaningfulProgress.current=0;goHintShown.current=false;advancedHintShown.current=false;attemptStartedAt.current=null;pathSamples.current=0;insidePathSamples.current=0;coveredBuckets.current=value.strokes.map(()=>new Set<number>());hintsUsed.current=0;completionReported.current=false;startedAt.current=performance.now();lastProgressAt.current=startedAt.current;setHintAge(0);setStrokeIndex(0);setComplete(false);setFeedback(null);setTransitioning(false);setMessage(level===3?'Find the first stroke and begin when you are ready':'Place your finger on the purple Go spot')}) }, [challengeId, level, symbol])
   useEffect(() => { const id = window.setInterval(() => setHintAge((performance.now() - startedAt.current) / 1000), 250); return () => clearInterval(id) }, [strokeIndex])
-  const reset = useCallback(() => { if(transitionTimer.current!==null)window.clearTimeout(transitionTimer.current);transitionTimer.current=null;trace.current=[];completedTraces.current=[];traceState.current='WAITING';userProgress.current=0;guideProgress.current=0;previousPoint.current=null;smoothedPoint.current=null;strokeIndexRef.current=0;lastMeaningfulProgress.current=0;goHintShown.current=false;advancedHintShown.current=false;attemptStartedAt.current=null;pathSamples.current=0;insidePathSamples.current=0;coveredBuckets.current=data?.strokes.map(()=>new Set<number>())??[];hintsUsed.current=0;completionReported.current=false;setHintAge(0);setStrokeIndex(0);setComplete(false);setFeedback(null);setTransitioning(false);setMessage(level===3?'Find the first stroke and begin when you are ready':'Place your finger on the purple Go spot');startedAt.current=performance.now();lastProgressAt.current=startedAt.current }, [data,level])
+  const reset = useCallback(() => {
+    const attemptInProgress = attemptStartedAt.current !== null || trace.current.length > 0 || completedTraces.current.length > 0
+    if (sessionMode === 'learning' && !completionReported.current && attemptInProgress) onComplete({ symbol, level, durationSeconds: attemptStartedAt.current === null ? 0 : (performance.now() - attemptStartedAt.current) / 1000, pathAccuracy: 0, dotCoverage: 0, hintsUsed: hintsUsed.current, passed: false })
+    if(transitionTimer.current!==null)window.clearTimeout(transitionTimer.current);transitionTimer.current=null;trace.current=[];completedTraces.current=[];traceState.current='WAITING';userProgress.current=0;guideProgress.current=0;previousPoint.current=null;smoothedPoint.current=null;strokeIndexRef.current=0;lastMeaningfulProgress.current=0;goHintShown.current=false;advancedHintShown.current=false;attemptStartedAt.current=null;pathSamples.current=0;insidePathSamples.current=0;coveredBuckets.current=data?.strokes.map(()=>new Set<number>())??[];hintsUsed.current=0;completionReported.current=false;setHintAge(0);setStrokeIndex(0);setComplete(false);setFeedback(null);setTransitioning(false);setMessage(level===3?'Find the first stroke and begin when you are ready':'Place your finger on the purple Go spot');startedAt.current=performance.now();lastProgressAt.current=startedAt.current
+  }, [data, level, onComplete, sessionMode, symbol])
 
   const draw = useCallback((finger?: Point) => {
     const canvas=canvasRef.current, video=videoRef.current; if (!canvas || !data) return
@@ -558,7 +706,7 @@ function Practice({ level, symbol, challengeId, sessionMode, masteredCount, goBa
       if(userProgress.current>=metrics.total-12*scale&&Math.hypot(p[0]-end[0],p[1]-end[1])<=16*scale){
         trace.current.push(end);completedTraces.current.push([...trace.current]);trace.current=[];previousPoint.current=null;userProgress.current=0;guideProgress.current=0;lastMeaningfulProgress.current=0
         const next=activeIndex+1
-        if(next===data.strokes.length){strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';if(!completionReported.current){completionReported.current=true;const totalBuckets=data.strokes.reduce((sum,item)=>sum+Math.max(4,Math.ceil(polylineMetrics(item.points).total/.025)),0),covered=coveredBuckets.current.reduce((sum,buckets)=>sum+buckets.size,0),result=onComplete({symbol,level,durationSeconds:(performance.now()-(attemptStartedAt.current??performance.now()))/1000,pathAccuracy:pathSamples.current?insidePathSamples.current/pathSamples.current:1,dotCoverage:totalBuckets?covered/totalBuckets:1,hintsUsed:hintsUsed.current});setFeedback(result)}setComplete(true);setMessage(`Amazing! Look at the ${symbol} you created!`)} else {traceState.current='TRANSITION';transitionStartedAt.current=performance.now();setTransitioning(true);setMessage(`Wonderful stroke ${next}! Pause and look at what you made…`);transitionTimer.current=window.setTimeout(()=>{strokeIndexRef.current=next;setHintAge(0);setStrokeIndex(next);traceState.current='WAITING';goHintShown.current=false;advancedHintShown.current=false;setTransitioning(false);setMessage(level===3?`Ready? Find the start of stroke ${next+1}`:`Ready? Find Go for stroke ${next+1}`);startedAt.current=performance.now();lastProgressAt.current=startedAt.current;transitionTimer.current=null},1000)}
+        if(next===data.strokes.length){strokeIndexRef.current=next;setStrokeIndex(next);traceState.current='WAITING';if(!completionReported.current){completionReported.current=true;const totalBuckets=data.strokes.reduce((sum,item)=>sum+Math.max(4,Math.ceil(polylineMetrics(item.points).total/.025)),0),covered=coveredBuckets.current.reduce((sum,buckets)=>sum+buckets.size,0),result=onComplete({symbol,level,durationSeconds:(performance.now()-(attemptStartedAt.current??performance.now()))/1000,pathAccuracy:pathSamples.current?insidePathSamples.current/pathSamples.current:1,dotCoverage:totalBuckets?covered/totalBuckets:1,hintsUsed:hintsUsed.current,passed:true});setFeedback(result)}setComplete(true);setMessage(`Amazing! Look at the ${symbol} you created!`)} else {traceState.current='TRANSITION';transitionStartedAt.current=performance.now();setTransitioning(true);setMessage(`Wonderful stroke ${next}! Pause and look at what you made…`);transitionTimer.current=window.setTimeout(()=>{strokeIndexRef.current=next;setHintAge(0);setStrokeIndex(next);traceState.current='WAITING';goHintShown.current=false;advancedHintShown.current=false;setTransitioning(false);setMessage(level===3?`Ready? Find the start of stroke ${next+1}`:`Ready? Find Go for stroke ${next+1}`);startedAt.current=performance.now();lastProgressAt.current=startedAt.current;transitionTimer.current=null},1000)}
       }
     } else { previousPoint.current=null }
   },[complete,data,level,onComplete,symbol])

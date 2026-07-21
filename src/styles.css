@@ -12,3 +12,5 @@
 @media(max-width:1050px){.level-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:850px){.level-grid{grid-template-columns:1fr}.freewrite-layout aside{display:block}.freewrite-target{min-height:150px;font-size:110px}.freewrite-copy{max-width:420px;margin:16px auto}.freewrite-next{max-width:260px}}
 @media(max-width:560px){.profile-button>span:last-child{display:none}.profile-button{padding:4px}.mastery-roadmap{gap:9px}.roadmap-step{padding:13px}.progress-legend{display:none}.progress-grid{grid-template-columns:repeat(5,1fr)}.profile-dialog{padding:28px 22px}.session-badge{font-size:0;padding:8px}.session-badge svg{width:18px;height:18px}}
+.stroke-preview-arrow{stroke-width:1.2}.mastery-roadmap{grid-template-columns:repeat(4,1fr)}.guidance-step{opacity:1}
+@media(max-width:850px){.mastery-roadmap{grid-template-columns:1fr}}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowLeft, Camera, ChevronRight, Hand, LockKeyhole, MousePointer2, RotateCcw, Sparkles, Star, Trophy } from 'lucide-react'
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision'
 import type { Level, Point, StrokeData } from './types'
@@ -49,15 +49,23 @@ function isPointingHand(hand: Array<{x:number;y:number}>) {
 }
 
 function StrokePreview({ points }: { points: Point[] }) {
-  const markerId=useId().replace(/:/g,'')
   const xs=points.map(point=>point[0]),ys=points.map(point=>point[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys)
-  const width=Math.max(maxX-minX,.001),height=Math.max(maxY-minY,.001),scale=Math.min(76/width,42/height)
-  const offsetX=8+(76-width*scale)/2-minX*scale,offsetY=8+(42-height*scale)/2-minY*scale
+  const width=Math.max(maxX-minX,.001),height=Math.max(maxY-minY,.001),scale=Math.min(88/width,42/height)
+  const offsetX=12+(88-width*scale)/2-minX*scale,offsetY=11+(42-height*scale)/2-minY*scale
   const preview=points.map(([x,y])=>[x*scale+offsetX,y*scale+offsetY] as Point)
   const path=preview.map(([x,y],index)=>`${index?'L':'M'} ${x.toFixed(2)} ${y.toFixed(2)}`).join(' ')
-  return <svg className="stroke-preview" viewBox="0 0 92 58" aria-hidden="true">
-    <defs><marker id={markerId} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 8 4 L 0 8 z"/></marker></defs>
-    <path className="stroke-preview-path" d={path} markerEnd={`url(#${markerId})`}/>
+  const metrics=polylineMetrics(preview)
+  const arrowFractions=metrics.total>130?[.18,.38,.58,.78,1]:metrics.total>72?[.22,.48,.74,1]:metrics.total>30?[.32,.66,1]:[1]
+  const arrows=arrowFractions.map((fraction,index)=>{
+    const distance=metrics.total*fraction,position=pointAtDistance(preview,metrics.lengths,metrics.cumulative,distance)
+    const before=pointAtDistance(preview,metrics.lengths,metrics.cumulative,Math.max(0,distance-7))
+    const after=pointAtDistance(preview,metrics.lengths,metrics.cumulative,Math.min(metrics.total,distance+7))
+    const angle=Math.atan2(after[1]-before[1],after[0]-before[0])*180/Math.PI
+    return <path className="stroke-preview-arrow" d="M 0 0 L -7 -3.6 L -5.6 0 L -7 3.6 Z" transform={`translate(${position[0].toFixed(2)} ${position[1].toFixed(2)}) rotate(${angle.toFixed(2)})`} key={`${fraction}-${index}`}/>
+  })
+  return <svg className="stroke-preview" viewBox="0 0 112 64" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+    <path className="stroke-preview-path" d={path}/>
+    {arrows}
     <circle className="stroke-preview-start" cx={preview[0][0]} cy={preview[0][1]} r="4"/>
   </svg>
 }
@@ -129,20 +137,20 @@ function Practice({ level, symbol, goBack, onComplete }: { level: Level; symbol:
     if (level!==1) { data.strokes.forEach((s,i)=>{path(s.points);ctx.strokeStyle=i<strokeIndex?'#56baa7':i===strokeIndex?'rgba(108,86,223,.55)':'rgba(108,86,223,.18)';ctx.lineWidth=10;ctx.setLineDash([2,18]);ctx.lineCap='round';ctx.stroke()});ctx.setLineDash([]) }
     completedTraces.current.forEach(points=>{if(points.length>1){path(points,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()}})
     if (trace.current.length>1) { path(trace.current,true);ctx.strokeStyle='#ef6d9e';ctx.lineWidth=24;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash([]);ctx.stroke() }
+    if (finger) { ctx.fillStyle='#ffe05b';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(finger[0],finger[1],11,0,Math.PI*2);ctx.fill();ctx.stroke() }
     if (!complete&&stroke) { const start=point(stroke.points[0]), end=point(stroke.points.at(-1)!), now=performance.now()
       if(level===3&&traceState.current==='WAITING'&&hintAge>=10&&!goHintShown.current){goHintShown.current=true;setMessage('Hint: begin at the green Go spot')}
       if(level===3&&!advancedHintShown.current&&((traceState.current==='WAITING'&&hintAge>=20)||(traceState.current==='TRACING'&&now-lastProgressAt.current>=10000))){advancedHintShown.current=true;setMessage('Need help? Follow the green guide to END')}
       const showStart=(level<=2&&traceState.current==='WAITING')||(level===3&&traceState.current==='WAITING'&&goHintShown.current)
       const showAdvanced=level===3&&advancedHintShown.current&&traceState.current!=='TRANSITION'
-      if (showStart) { ctx.fillStyle=level===3?'#30a992':'#6c56df';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4) }
       if ((level<=2&&traceState.current==='TRACING') || showAdvanced) { ctx.fillStyle='#30a992';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(end[0],end[1],21,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='white';ctx.font='800 9px sans-serif';ctx.textAlign='center';ctx.fillText('END',end[0],end[1]+3) }
       if((level<=2&&traceState.current==='TRACING')||showAdvanced){
         const activePoints=screenStrokes[strokeIndex],metrics=polylineMetrics(activePoints),scale=Math.max(.72,size/720),first=activePoints[0],last=activePoints.at(-1)!,mostlyVertical=Math.abs(last[1]-first[1])>Math.abs(last[0]-first[0]),movingUp=mostlyVertical&&last[1]<first[1],movingDown=mostlyVertical&&last[1]>first[1],lead=(movingUp?44:movingDown?36:46)*(level===2?1.12:1)*scale
         guideProgress.current=Math.min(metrics.total,userProgress.current+lead)
         const guide=pointAtDistance(screenStrokes[strokeIndex],metrics.lengths,metrics.cumulative,guideProgress.current);ctx.shadowColor='#79e7ba';ctx.shadowBlur=18;ctx.fillStyle='#4ed3a0';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(guide[0],guide[1],13,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0
       }
+      if (showStart) { ctx.save();ctx.shadowColor=level===3?'rgba(48,169,146,.72)':'rgba(108,86,223,.72)';ctx.shadowBlur=15;ctx.fillStyle=level===3?'#30a992':'#6c56df';ctx.strokeStyle='white';ctx.lineWidth=5;ctx.beginPath();ctx.arc(start[0],start[1],20,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0;ctx.fillStyle='white';ctx.font='800 11px sans-serif';ctx.textAlign='center';ctx.fillText('GO',start[0],start[1]+4);ctx.restore() }
     }
-    if (finger) { ctx.fillStyle='#ffe05b';ctx.strokeStyle='white';ctx.lineWidth=4;ctx.beginPath();ctx.arc(finger[0],finger[1],11,0,Math.PI*2);ctx.fill();ctx.stroke() }
   },[cameraOn,complete,data,hintAge,level,strokeIndex])
 
   const addPoint = useCallback((p: Point, pointing=true) => {

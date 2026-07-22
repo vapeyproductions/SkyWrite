@@ -364,17 +364,24 @@ function FreeWritePractice({ symbol, challengeId, sessionMode, masteredCount, go
     const rawCandidate = [...strokes.current, ...(activeStroke.current.length >= 2 ? [[...activeStroke.current]] : [])]
     const box = canvasRef.current?.getBoundingClientRect()
     if (!box) return
-    const structure = structuralAssessment(rawCandidate, referenceData.current, symbol, Math.min(box.width, box.height)), candidate = structure.cleaned
+    const structure = structuralAssessment(rawCandidate, referenceData.current, symbol, Math.min(box.width, box.height))
+    const candidate = structure.cleaned.length
+      ? structure.cleaned
+      : rawCandidate.filter(stroke => stroke.length >= 2)
     const quality = freeWriteStats(candidate, box.width, box.height), minimum = Math.min(box.width, box.height)
-    const clearlyVisible = quality.height >= minimum * .16 && Math.max(quality.width, quality.height) >= minimum * .22
-    const uncluttered = quality.coverage < .09 && quality.pathLength < minimum * 6 && quality.strokeCount <= expectedStrokeCount.current + 1
-    if (!clearlyVisible || !uncluttered || !structure.complete || structure.substantialExtra) return
+    const clearlyVisible = quality.height >= minimum * .12 && Math.max(quality.width, quality.height) >= minimum * .18
+    const uncluttered = quality.coverage < .09 && quality.pathLength < minimum * 7.5 && quality.strokeCount <= expectedStrokeCount.current + 2
+    if (!clearlyVisible || !uncluttered) return
     recognitionBusy.current = true
     try {
       const assessment = await model.assess(candidate, symbol)
       const acceptedZero = symbol === '0' && structure.score >= .38 && looksLikeZero(candidate, box.width, box.height)
       const strongTemplateOverride = (symbol === 'I' || symbol.toLowerCase() === 'c') && structure.score >= .68
-      const matchedWholeCharacter = (assessment.matched && structure.score >= .44) || acceptedZero || strongTemplateOverride
+      // Free Write is judged primarily by the trained whole-character model.
+      // Template geometry remains a fallback for the two historically ambiguous shapes,
+      // but no longer vetoes a confident match merely because a child lifted a finger
+      // or used a different valid stroke split.
+      const matchedWholeCharacter = assessment.matched || acceptedZero || strongTemplateOverride
       if (matchedWholeCharacter && !passed.current && revision === drawingRevision.current) {
         passed.current = true
         finishStroke()

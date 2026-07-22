@@ -33,7 +33,7 @@ Webcam
   -> delayed, smoothed pen strokes
   -> 3-channel 48x48 raster
   -> 62-class symbol CNN
-  -> ordered-stroke structural verifier
+  -> visibility/overdraw checks + targeted shape fallback
   -> pass, retry, or guided reminder
 ```
 
@@ -60,21 +60,23 @@ The second model classifies the completed air-writing as one of 62 labels: digit
 
 The convolutional neural network uses four convolution blocks (`32 -> 64 -> 128 -> 192` channels) with batch normalization, ReLU activations, pooling, global average pooling, 0.25 dropout, and a 62-class linear head. It has 329,794 learned parameters.
 
-Training used cross-entropy with 0.05 label smoothing, AdamW (`lr=2e-3`, `weight_decay=2e-4`), cosine learning-rate annealing, and augmentation with small rotations, translations, scale changes, and Gaussian noise. The split was participant-disjoint so the same person's writing style could not appear in both training and validation.
+Training used cross-entropy with 0.05 label smoothing, AdamW (`lr=2e-3`, `weight_decay=2e-4`), cosine learning-rate annealing, and augmentation with small rotations, translations, scale changes, and Gaussian noise. Model selection used a participant-disjoint split so the same person's writing style could not appear in both training and validation. After selecting the checkpoint, the deployment model was fine-tuned on every usable sample so none of the contributed writing was discarded.
 
-On the held-out pilot split of 98 samples from 2 entirely held-out participants, the selected checkpoint achieved:
+On the expanded participant-disjoint validation split of 186 samples from 3 entirely held-out writers, the selected pre-fine-tuning checkpoint achieved:
 
 | Metric | Result |
 | --- | ---: |
-| Exact 62-class accuracy | 71.4% |
-| Top-3 accuracy | 86.7% |
-| Case-folded accuracy | 79.6% |
+| Exact 62-class accuracy | 47.8% |
+| Top-3 accuracy | 69.9% |
+| Case-folded accuracy | 60.8% |
 
-These are small pilot-set engineering metrics, not evidence of classroom effectiveness or performance across all children and devices.
+This harder split measures transfer to writers the model had never seen. It is a small volunteer-set engineering metric, not evidence of classroom effectiveness or performance across all children and devices. Because the deployed checkpoint was subsequently fine-tuned on the complete corpus, its final-corpus fit statistics are not reported as independent validation results.
 
 ### 3. Structural verifier and retry behavior
 
-The CNN is deliberately not the only judge. SkyWrite also removes tiny startup marks, compares cleaned strokes with the hidden ordered manuscript reference, checks stroke count and direction, and applies extra shape checks to easily confused characters. A result must satisfy both recognition confidence and structural similarity before it passes.
+The CNN is the primary judge of the completed character. SkyWrite also removes tiny startup marks and rejects attempts that are too small, excessively long, too heavily filled, or far beyond the expected stroke count. Template geometry remains a fallback for historically ambiguous `0`, `I`, and `C/c` shapes, but it no longer vetoes a confident model match simply because a child lifted their finger or used a different valid stroke split.
+
+The former model-and-template gate was too strict: only **7.0%** of 316 usable newly collected attempts passed the complete Level 4 pipeline. With the retrained model and calibrated quality checks, **85.4%** pass the same offline regression harness. That comparison measures behavior on samples used during this development round, so it validates the acceptance pipeline rather than estimating performance on unseen children.
 
 If drawing covers 9% of the board without a passing answer, the board clears for another attempt. After 30 seconds without a pass, SkyWrite clears the previous ink and reveals the Level 3-style stroke diagrams and tracing sequence. The learner must touch each **GO**, follow its path to **END**, and wait for the next stroke. Completing this reminder finishes the activity but never counts toward the three-pass Level 4 mastery streak.
 
@@ -82,7 +84,7 @@ If drawing covers 9% of the board without a passing answer, the board clears for
 
 To obtain data that matched the actual interaction, a separate web collector presented all 62 characters to volunteers and recorded anonymous air-writing samples. MediaPipe ran on each volunteer's device; raw video was never uploaded. Each sample contained a pseudonymous participant code, the assigned character, normalized hand landmarks, the 70 derived features, timestamps, DRAW/MOVE labels, and normalized index-finger strokes.
 
-The private pilot corpus contains **439 character samples from 11 participants**, spans all 62 classes, and contains 97,031 landmark frames. Participants—not individual frames—were split between training and validation. This prevents samples from one writer from leaking into both sets. The GRU and CNN checkpoints were selected by held-out F1 and exact accuracy respectively, exported with ONNX opset 17, then tested through the same browser preprocessing used by Level 4.
+After the second collection round, the private corpus contains **754 usable character samples from 17 pseudonymous participants**, spans all 62 classes, and contains **134,499 landmark frames**. The symbol model's selection split separated participants—not individual frames—to prevent one writer's samples from leaking into both training and validation. The chosen checkpoint was then fine-tuned across the complete usable corpus, exported with ONNX opset 17, checked for structural validity, and compared numerically with the PyTorch checkpoint before browser integration. The high-performing DRAW/MOVE intent checkpoint was retained because offline analysis identified character recognition and the template veto—not pen-intent classification—as the Level 4 bottlenecks.
 
 Raw volunteer samples and PyTorch checkpoints are intentionally excluded from this public repository. The deployed, inference-only ONNX files and their non-identifying normalization metadata live in [`public/models`](public/models); the browser inference code is in [`src/intentModel.ts`](src/intentModel.ts) and [`src/symbolModel.ts`](src/symbolModel.ts). Export architecture is documented in [`scripts/export_intent_model.py`](scripts/export_intent_model.py) and [`scripts/export_symbol_model.py`](scripts/export_symbol_model.py).
 
